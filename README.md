@@ -14,8 +14,8 @@ Already done:
     - insert
     - erase
 - JudyL:
-- get
-- insert
+    - get
+    - insert
 
 Upcoming:
 - JudyL
