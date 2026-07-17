@@ -23,6 +23,8 @@
 #include <type_traits>
 #include <cstdlib> // for malloc
 
+#include <array> // for std::array
+
 // JUDY1
 #include <stdexcept> 
 
@@ -34,8 +36,9 @@ constexpr std::size_t CACHE_LINE_SIZE_WORDS = 8;
 constexpr std::size_t BRANCH_LINEAR_MAX = 7;      
 constexpr std::size_t BRANCH_BITMAP_MAX = 185;
 constexpr std::size_t LEAF_LINEAR_MAX = 128;  
-constexpr std::size_t LEAF1_LINEAR_MAX = 32; 
-constexpr std::size_t LEAF_LINEAR_CL_MAX = 2; 
+constexpr std::size_t LEAF1_LINEAR_MAX = 32;
+constexpr std::size_t JUDY1_LEAF_LINEAR_CL_MAX = 2;
+constexpr std::size_t JUDYL_LEAF_LINEAR_CL_MAX = 4;      
 constexpr std::size_t UNDER_BRANCH_LINEAR_MAX = 1000;
 constexpr std::size_t UNDER_BRANCH_BITMAP_MAX = 135;
 constexpr std::size_t MIN_ARRAY_SIZE_TO_UNCOMPRESSED = 750;
@@ -56,7 +59,6 @@ constexpr std::size_t HYSTERESYS_LEAF_BITMAP_TO_LINEAR = 1;
 constexpr std::size_t HYSTERESYS_BRANCH_BITMAP_TO_LINEAR = 1;
 constexpr std::size_t HYSTERESYS_BRANCH_UNCOMPRESSED_TO_BITMAP = 10;
 constexpr std::size_t HYSTERESYS_BRANCH_UNCOMPRESSED_TO_LINEAR = 0; 
-
 
 static_assert(BRANCH_LINEAR_MAX <= EXPANSE_COUNT && BRANCH_BITMAP_MAX <= EXPANSE_COUNT);
 
@@ -81,7 +83,7 @@ namespace judy {
     constexpr std::size_t SUBEXPANSE_COUNT = (EXPANSE_COUNT  + word_bits_size - 1) / word_bits_size;
 
 
-   enum class ErrorType {
+    enum class ErrorType {
         NotError = 0,
         NoMem = 1,
         Unsorted = 2,
@@ -249,14 +251,14 @@ namespace judy {
 
         static constexpr std::size_t LIMIT_MAX = std::max({LIMIT_1, LIMIT_2});
 
-       static constexpr std::size_t STEP_1 = 4;
+        static constexpr std::size_t STEP_1 = 4;
         static constexpr std::size_t STEP_2 = 16;
         static constexpr std::size_t STEP_3 = 32;
 
         static constexpr std::size_t STEP_LIMIT_1 = 16;
         static constexpr std::size_t STEP_LIMIT_2 = 64;
 
-       static constexpr std::size_t MAX_SIZES_COUNT = 32;
+        static constexpr std::size_t MAX_SIZES_COUNT = 32;
 
         template<std::size_t MaxSize>
         struct ArraySizes {
@@ -268,6 +270,7 @@ namespace judy {
 
             ArraySizes<MAX_SIZES_COUNT> ans{};
             
+            // Самые маленькие массивы будем сразу на кэш-линию создавать
             std::size_t curr_bytes = CACHE_LINE_SIZE_WORDS * word_size;
             while(ans.count < MAX_SIZES_COUNT && (curr_bytes / word_size) <= LIMIT_MAX) {
                 std::size_t words_with_header = curr_bytes / word_size;
@@ -292,7 +295,7 @@ namespace judy {
             return ans;
         }();
 
-       static constexpr std::size_t get_capacity(std::size_t size) {
+        static constexpr std::size_t get_capacity(std::size_t size) {
             std::size_t i = 0;
             while(i < arr_sizes.count - 1 && arr_sizes.sizes[i] < size) {
                 ++i;
@@ -305,7 +308,7 @@ namespace judy {
             return ans;        
         }
 
-       static bool can_insert_inplace(std::size_t pop1, std::size_t element_size) {
+        static bool can_insert_inplace(std::size_t pop1, std::size_t element_size) {
             const std::size_t old_words = (pop1 * element_size + word_size - 1) / word_size;
             const std::size_t new_words = ((pop1 + 1) * element_size + word_size - 1) / word_size;
             return get_capacity(old_words) == get_capacity(new_words);
@@ -326,15 +329,33 @@ namespace judy {
             std::memset(ptr, 0, size);
         }
 
+        template<typename JudyPolicy>
+        struct JllLimits {
+            static constexpr word_t leaf_max_words = JudyPolicy::jll_max_cache_lines * CACHE_LINE_SIZE_WORDS;
+        
+            static constexpr std::array<word_t, root_level + 1> max_pop1 = [] {
+                std::array<word_t, root_level + 1> result{};
+
+                for(std::size_t level = 1; level <= root_level; ++level) {
+                    const word_t absolute_limit = (level == 1) ? LEAF1_LINEAR_MAX : LEAF_LINEAR_MAX;
+
+                    while(result[level] < absolute_limit && JudyPolicy::jll_words(level, result[level] + 1) <= leaf_max_words) {
+                        ++result[level];
+                    }
+                }
+                return result;
+            }();
+        };
+        
+        template<typename JudyPolicy>
         inline constexpr word_t leaf_max_pop1(std::size_t level) {
-            constexpr word_t leaf_max_words = LEAF_LINEAR_CL_MAX * CACHE_LINE_SIZE_WORDS;
-            const word_t max_leaf_keys = (leaf_max_words * word_size) / level;
-            return ((max_leaf_keys < LEAF_LINEAR_MAX) ? max_leaf_keys : LEAF_LINEAR_MAX);
+            return JllLimits<JudyPolicy>::max_pop1[level];
         }
 
+        template<typename JudyPolicy>
         inline constexpr word_t branch_to_leaf_threshold(std::size_t level) {
-            const word_t leaf = leaf_max_pop1(level);
-            return ((HYSTERESYS_BRANCH_TO_LEAF >= leaf) ? 0 : (leaf - HYSTERESYS_BRANCH_TO_LEAF));
+            const word_t max_pop1 = leaf_max_pop1<JudyPolicy>(level);
+            return (HYSTERESYS_BRANCH_TO_LEAF >= max_pop1 ? 0 : (max_pop1 - HYSTERESYS_BRANCH_TO_LEAF));
         }
 
         inline constexpr word_t branch_bitmap_to_linear_threshold() {
@@ -352,9 +373,11 @@ namespace judy {
                     : (BRANCH_LINEAR_MAX - HYSTERESYS_BRANCH_UNCOMPRESSED_TO_LINEAR));
         }
 
+        template<typename JudyPolicy>
         inline constexpr word_t leaf_bitmap_to_linear_threshold() {
-            return ((HYSTERESYS_LEAF_BITMAP_TO_LINEAR >= LEAF1_LINEAR_MAX) ? 0 
-                    : (LEAF1_LINEAR_MAX - HYSTERESYS_LEAF_BITMAP_TO_LINEAR));
+            const word_t max_pop1 = leaf_max_pop1<JudyPolicy>(1);
+            return ((HYSTERESYS_LEAF_BITMAP_TO_LINEAR >= max_pop1) ? 0 
+                    : (max_pop1 - HYSTERESYS_LEAF_BITMAP_TO_LINEAR));
         }
 
     } // namespace memory
@@ -393,6 +416,8 @@ namespace judy {
             // bools
             { Policy::has_values }      -> std::convertible_to<bool>;
 
+            { Policy::jll_max_cache_lines } -> std::convertible_to<std::size_t>;
+
             // JPImmed
             { Policy::immed_max_cnt(level) }    -> std::same_as<word8_t>;
             { Policy::immed_keys(   jp, pop1) } -> std::same_as<word8_t*>;
@@ -425,10 +450,6 @@ namespace judy {
 
             { Policy::template jlb_destroy_subexpanse<DefaultMemoryPolicy>(jlb, subexpanse) } -> std::same_as<void>;
             { Policy::template jlb_destroy<DefaultMemoryPolicy>(jlb) }                        -> std::same_as<void>;
-            
-
-            // ret
-            
 
         };  
         
@@ -437,6 +458,8 @@ namespace judy {
             using JLB = Judy1JLB;
 
             static constexpr bool has_values = false;
+
+            static constexpr std::size_t jll_max_cache_lines = JUDY1_LEAF_LINEAR_CL_MAX;
 
             static constexpr word8_t immed_max_cnt(std::size_t k) {
                 return static_cast<word8_t>((2 * word_size - 1) / k);
@@ -495,7 +518,7 @@ namespace judy {
                 return nullptr;
             }
 
-            static std::size_t jll_key_words(std::size_t level, std::size_t pop1) {
+            static constexpr std::size_t jll_key_words(std::size_t level, std::size_t pop1) {
                 return ((level * pop1 + word_size - 1) / word_size);
             }
 
@@ -504,8 +527,7 @@ namespace judy {
                 return MemoryPolicy::get_capacity(jll_words(level, pop1));
             }
 
-            template<JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
-            static std::size_t jll_words(std::size_t level, std::size_t pop1) {
+            static constexpr std::size_t jll_words(std::size_t level, std::size_t pop1) {
                 return jll_key_words(level, pop1);
             }
 
@@ -537,6 +559,8 @@ namespace judy {
             using JLB = JudyLJLB;
 
             static constexpr bool has_values = true;
+
+            static constexpr std::size_t jll_max_cache_lines = JUDYL_LEAF_LINEAR_CL_MAX;
 
             static constexpr word8_t immed_max_cnt(std::size_t k) {
                 return static_cast<word8_t>((word_size - 1) / k);
@@ -601,11 +625,11 @@ namespace judy {
                 return const_cast<word_t*>(immed_values(static_cast<const JP*>(jp), pop1));
             }
 
-            static std::size_t jll_key_words(std::size_t level, std::size_t pop1) {
+            static constexpr std::size_t jll_key_words(std::size_t level, std::size_t pop1) {
                 return ((level * pop1 + word_size - 1) / word_size);
             }
 
-            static std::size_t jll_words(std::size_t level, std::size_t pop1) {
+            static constexpr std::size_t jll_words(std::size_t level, std::size_t pop1) {
                 return jll_key_words(level, pop1) + pop1;
             }
 
@@ -1090,7 +1114,7 @@ namespace judy {
                 ++subexpanse_pops[subexpanse];
             }
 
-            bool res = allocate_jbb_pointers(jbb, subexpanse_pops);
+            bool res = allocate_jbb_pointers<MemoryPolicy>(jbb, subexpanse_pops);
             if(!res) {
                 MemoryPolicy::deallocate(jbb);
                 return nullptr;
@@ -1127,6 +1151,7 @@ namespace judy {
             }
 
             JP new_jp;
+            // 0 - Judy1, value - JudyL. If new тогда тоже 0.
             set_immed1<JudyPolicy>(&new_jp, index, branch_level - 1, 0);
 
             JP old_jp = *jp;
@@ -1171,7 +1196,7 @@ namespace judy {
         
             std::size_t subexpanse_pops[SUBEXPANSE_COUNT] = {0};
             for(std::size_t offset = 0; offset < count; ++offset) {
-                word_t digit = jll_keys[(start + offset) * level]; 
+                word_t digit = jll_keys[(start + offset) * level]; // считываем только младший байт
                 std::size_t subexpanse = digit / word_bits_size;
 
                 JudyPolicy::jlb_set_bit(jlb, subexpanse, bit_pos_mask(digit));
@@ -1185,7 +1210,6 @@ namespace judy {
                     if(subexpanse_pops[subexpanse] == 0) {
                         continue;
                     }
-                    
                     std::size_t need_capacity = MemoryPolicy::get_capacity(subexpanse_pops[subexpanse]) * word_size;
                     word_t* jlb_values = static_cast<word_t*>(MemoryPolicy::allocate(need_capacity));
 
@@ -1374,7 +1398,7 @@ namespace judy {
                     
                     void* new_jll = static_cast<void*>(MemoryPolicy::allocate(need_capacity));
                     if(!new_jll) {
-                    
+                        
                         free_jll_cascade<JudyPolicy, MemoryPolicy>(pointers, subexpanse);
                         return false;
                     }
@@ -1411,7 +1435,7 @@ namespace judy {
                 jp->node.addr = reinterpret_cast<word_t>(jbl);
                 jp->node.type = types::JBL_Level(level);                
             } else {
-                JBB* jbb = build_jbb_from_linear(digits, pointers, subexpanse);
+                JBB* jbb = build_jbb_from_linear<MemoryPolicy>(digits, pointers, subexpanse);
                 if(!jbb) {
                     free_jll_cascade<JudyPolicy, MemoryPolicy>(pointers, subexpanse);
                     return false;
@@ -1425,25 +1449,34 @@ namespace judy {
 
             return 1;
         }
-
-       
         // -1 - corrupt
         // 1 - success
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
-        inline void copy_immedleaf_to_jll(word8_t* jll, std::size_t& pos, word8_t top_byte,
-                                         JP* jp, std::size_t level) {
+        inline void copy_immedleaf_to_jll(void* jll, std::size_t& pos, word8_t top_byte,
+                                         JP* jp, std::size_t level, std::size_t node_pop1) {
             using JLB = typename JudyPolicy::JLB;
 
             const std::size_t child_level = level - 1;
             const word8_t type = jp->node.type;
+           
+            std::size_t new_offset = pos / level;
+            word8_t* new_keys = JudyPolicy::jll_keys(jll, level, node_pop1);
+            word_t* new_values = JudyPolicy::template jll_values<MemoryPolicy>(jll, level, node_pop1);
+
 
             if(type == types::JLL_Level(child_level)) {
-                word8_t* leaf = get_ptr<word8_t>(jp->node.addr);
+                void* leaf = get_ptr<void>(jp->node.addr);
                 const word_t pop1 = get_pop0(jp, child_level) + 1;
+                word8_t* old_keys = JudyPolicy::jll_keys(leaf, child_level, pop1);
+                word_t* old_values = JudyPolicy::template jll_values<MemoryPolicy>(leaf, child_level, pop1);
 
                 for(std::size_t offset = 0; offset < pop1; ++offset) {
-                    std::memcpy(jll + pos, leaf + offset * child_level, child_level);
-                    jll[pos + child_level] = top_byte;
+                    std::memcpy(new_keys + pos, old_keys + offset * child_level, child_level);
+                    if constexpr(JudyPolicy::has_values) {
+                        new_values[new_offset++] = old_values[offset];
+                    }
+
+                    new_keys[pos + child_level] = top_byte;
                     pos += level;
                 }
                 MemoryPolicy::deallocate(leaf);
@@ -1451,33 +1484,47 @@ namespace judy {
             else if(type >= types::JPImmed_t<JudyPolicy>(child_level, 1) &&
                     type <= types::JPImmed_t<JudyPolicy>(child_level, JudyPolicy::immed_max_cnt(child_level))) {
                 word_t pop1 = type - types::JPImmed_t<JudyPolicy>(child_level, 1) + 1;
-                //word8_t* keys = jp->immed.keys;
-                word8_t* keys = JudyPolicy::immed_keys(jp, pop1);
-
-                //if(pop1 == 1) {
-                //    keys += word_size;
-                //} 
+                word8_t* old_keys = JudyPolicy::immed_keys(jp, pop1);
+                word_t* old_values = JudyPolicy::immed_values(jp, pop1);
 
                 for(std::size_t offset = 0; offset < pop1; ++offset) {
-                    std::memcpy(jll + pos, keys + offset * child_level, child_level);
-                    jll[pos + child_level] = top_byte;
+                    std::memcpy(new_keys + pos, old_keys + offset * child_level, child_level);
+                    if constexpr(JudyPolicy::has_values) {
+                        new_values[new_offset++] = old_values[offset]; 
+                    }
+                    
+                    new_keys[pos + child_level] = top_byte;
                     pos += level;
                 }
-            
+                if constexpr(JudyPolicy::has_values) {
+                    if(pop1 > 1) {
+                        MemoryPolicy::deallocate(old_values);
+                    }
+                }
             }
             else if(type == types::JLB_Base && child_level == 1) {
                 JLB* jlb = get_ptr<JLB>(jp->node.addr);
 
+                std::size_t pop1 = 0;
+                for(std::size_t subexpanse = 0; subexpanse < SUBEXPANSE_COUNT; ++subexpanse) {
+                    pop1 += std::popcount(JudyPolicy::jlb_bitmap(jlb, subexpanse));
+                }
+
                 for(std::size_t subexpanse = 0; subexpanse < SUBEXPANSE_COUNT; ++subexpanse) {
                     word_t bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
+                    word_t* old_values = JudyPolicy::jlb_values(jlb, subexpanse);
                     
+                    std::size_t old_offset = 0;
                     while(bitmap) {
                         const std::size_t first_bit = std::countr_zero(bitmap);
                         const word8_t digit = static_cast<word8_t>(subexpanse * word_bits_size + first_bit);
-
-                        jll[pos++] = digit;
-                        jll[pos++] = top_byte;
-
+                        
+                        if constexpr(JudyPolicy::has_values) {
+                            new_values[new_offset++] = old_values[old_offset++];
+                        }
+                    
+                        new_keys[pos++] = digit;
+                        new_keys[pos++] = top_byte;
                         bitmap &= (bitmap - 1);
                     }
                 }
@@ -1490,7 +1537,7 @@ namespace judy {
         }
 
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
-        void jbl_copy_traverse(JP* jp, word8_t* jll, std::size_t level) {
+        void jbl_copy_traverse(JP* jp, word8_t* jll, std::size_t level, std::size_t node_pop1) {
             JBL* jbl = get_ptr<JBL>(jp->node.addr);
             std::size_t jll_pos = 0;
             word_t jbl_pop1 = jbl->pop0 + 1;
@@ -1500,12 +1547,12 @@ namespace judy {
                 word8_t top_byte = jbl->keys[offset];
                 JP* curr_jp = &jbl->pointers[offset];
                 
-                copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(jll, jll_pos, top_byte, curr_jp, level);
+                copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(jll, jll_pos, top_byte, curr_jp, level, node_pop1);
             }
         }
 
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
-        void jbb_copy_traverse(JP* jp, word8_t* jll, std::size_t level) {
+        void jbb_copy_traverse(JP* jp, word8_t* jll, std::size_t level, std::size_t node_pop1) {
             JBB* jbb = get_ptr<JBB>(jp->node.addr);
             std::size_t jll_pos = 0;
 
@@ -1520,7 +1567,7 @@ namespace judy {
                 for(std::size_t offset = 0; offset < pop1; ++offset) {
                     JP* curr_jp = pointers + offset;
                     word8_t digit = static_cast<word8_t>(subexpanse * word_bits_size + std::countr_zero(bitmap));
-                    copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(jll, jll_pos, digit, curr_jp, level);
+                    copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(jll, jll_pos, digit, curr_jp, level, node_pop1);
                     
                     bitmap &= (bitmap - 1);
                 }
@@ -1529,7 +1576,7 @@ namespace judy {
         }
          
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
-        void jbu_copy_traverse(JP* jp, word8_t* jll, std::size_t level) {
+        void jbu_copy_traverse(JP* jp, word8_t* jll, std::size_t level, std::size_t node_pop1) {
             JBU* jbu = get_ptr<JBU>(jp->node.addr);
             std::size_t jll_pos = 0;
 
@@ -1540,7 +1587,7 @@ namespace judy {
                     continue;
                 }
 
-                copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(jll, jll_pos, digit, curr_jp, level);
+                copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(jll, jll_pos, digit, curr_jp, level, node_pop1);
             }
         }
 
@@ -1564,7 +1611,7 @@ namespace judy {
 
                 return (pop1 == 1 ? immed1_matches(jp, level, index) : leaf_linear_search<word8_t>(keys, pop1, level, index).found);
             }
-            else if(type == types::JLB_Base && level == 1) {
+            else if(type == types::JLB_Base) {
                 JLB* jlb = get_ptr<JLB>(jp->node.addr);
                 word_t digit = get_byte(index, level - 1);
                 word_t subexpanse = digit / word_bits_size;
@@ -1573,8 +1620,8 @@ namespace judy {
             } 
             else [[unlikely]] /* should never happen */ { 
                 assert(false);
+                return false;
             }
-            
         }
 
         template<policy::JudyArrayPolicy JudyPolicy>
@@ -1646,11 +1693,11 @@ namespace judy {
 
             // logic
             if(jp->node.type == types::JBL_Level(level)) {
-                jbl_copy_traverse<JudyPolicy, MemoryPolicy>(jp, jll, level);
+                jbl_copy_traverse<JudyPolicy, MemoryPolicy>(jp, jll, level, node_pop1);
             } else if(jp->node.type == types::JBB_Level(level)) {
-                jbb_copy_traverse<JudyPolicy,MemoryPolicy>(jp, jll, level);
+                jbb_copy_traverse<JudyPolicy,MemoryPolicy>(jp, jll, level, node_pop1);
             } else if(jp->node.type == types::JBU_Level(level)) {
-                jbu_copy_traverse<JudyPolicy,MemoryPolicy>(jp, jll, level);
+                jbu_copy_traverse<JudyPolicy,MemoryPolicy>(jp, jll, level, node_pop1);
             } 
             
             MemoryPolicy::deallocate(get_ptr<void>(jp->node.addr));
@@ -1703,6 +1750,7 @@ namespace judy {
             return true;
         }
 
+
         template<JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
         bool jbu_to_jbb(JP* jp, std::size_t level) {
 
@@ -1725,7 +1773,7 @@ namespace judy {
                 ++subexpanse_pops[subexpanse];
             }           
 
-            bool res = allocate_jbb_pointers(jbb, subexpanse_pops);
+            bool res = allocate_jbb_pointers<MemoryPolicy>(jbb, subexpanse_pops);
             if(!res) {
                 MemoryPolicy::deallocate(jbb);
                 return false;
@@ -1927,6 +1975,7 @@ namespace judy {
         JP* curr_jp = &arr->top_jp;
      
         if(curr_jp->node.type == types::Null_JP) [[unlikely]] {
+
             JBL* jbl = static_cast<JBL*>(MemoryPolicy::allocate(sizeof(JBL)));
             if(!jbl) {
                 arr->error.type = ErrorType::NoMem;
@@ -2025,6 +2074,7 @@ namespace judy {
                         continue;
                     }
 
+                    // вставляем
                     if(pop1 < BRANCH_LINEAR_MAX) {
 
                         JP new_jp;
@@ -2047,7 +2097,7 @@ namespace judy {
                     } else {
                         // JBL -> JBB
                         
-                        JBB* jbb = build_jbb_from_linear(jbl->keys, jbl->pointers, jbl->pop0 + 1);
+                        JBB* jbb = build_jbb_from_linear<MemoryPolicy>(jbl->keys, jbl->pointers, jbl->pop0 + 1);
                         if(!jbb) {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
@@ -2082,7 +2132,6 @@ namespace judy {
                     
                     JBB* jbb = get_ptr<JBB>(curr_jp->node.addr);
 
-                    
                     if(((arr->pop0 - arr->lastpop0) >= GLOBAL_HYSTERESYS)        &&
                         (arr->pop0 >= MIN_ARRAY_SIZE_TO_UNCOMPRESSED)            &&
                         (get_pop0(curr_jp, level) >= UNDER_BRANCH_BITMAP_MAX)   )
@@ -2104,8 +2153,7 @@ namespace judy {
                             if(!bitmap) {
                                 continue;
                             }
-                            
-                            
+
                             for(word_t bit = 0, offset = 0; bit < word_bits_size; ++bit, bitmap >>= 1, ++digit) {
                                 jbu->pointers[digit] = ((bitmap & 1) ? jps[offset++] : null_jp);
                             }
@@ -2162,7 +2210,7 @@ namespace judy {
                         insert_inplace<JP>(pointers, pop1, sizeof(JP), &new_jp, offset);
                         inserted_jp = pointers + offset;
                     } else {
-                        JP* new_pointers = insert_with_realloc<JP>(pointers, pop1, sizeof(JP), &new_jp, offset);
+                        JP* new_pointers = insert_with_realloc<JP, MemoryPolicy>(pointers, pop1, sizeof(JP), &new_jp, offset);
                         if(!new_pointers) {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
@@ -2229,17 +2277,15 @@ namespace judy {
                         goto WalkExit;
                     }
 
-                    word_t next_words = JudyPolicy::jll_words(level, pop1 + 1);
-
                     word8_t* jll = get_ptr<word8_t>(curr_jp->node.addr);
                     SearchResult search = leaf_binary_search<word8_t>(JudyPolicy::jll_keys(jll, level, pop1), pop1, level, index);
 
                     if(search.found) {
                         return CoreResult{ OpStatus::existed, nullptr };
                     }
-                    
-                    if(next_words > 2 * CACHE_LINE_SIZE_WORDS || pop1 == LEAF_LINEAR_MAX
-                        || (level == 1 && pop1 == LEAF1_LINEAR_MAX)) {
+
+                    if(pop1 + 1 > memory::leaf_max_pop1<JudyPolicy>(level))
+                        {
                         bool res = cascade<JudyPolicy, MemoryPolicy>(curr_jp, level, index);
                         if(!res) {
                             arr->error.type = ErrorType::NoMem;
@@ -2358,7 +2404,7 @@ namespace judy {
                             set_pop0(curr_jp, EXPANSE_COUNT - 1, level);
                             curr_jp->node.type = types::JLB_FULL;
                             
-                            --stack_pos;
+                            --stack_pos; 
                         }
                     } 
 
@@ -2472,7 +2518,7 @@ namespace judy {
                             insert_copy<word_t>(new_values, old_values, cnt, word_size, &value, search.pos);
                             
                             result_value = new_values + search.pos;
-                            
+
                             if(cnt > 1) {
                                 MemoryPolicy::deallocate(old_values);
                             }
@@ -2534,7 +2580,6 @@ namespace judy {
     // 0 - already deleted
     // 1 - succesfully
     // -1 - error (check jpm)
-   
     template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
     CoreResult judy_erase_core(JPM* arr, const word_t index) {
         word_t level, digit, offset, subexpanse, pop1, node_pop1, bitmap, bitmask;
@@ -2571,7 +2616,7 @@ namespace judy {
                     node_pop1 = get_pop0(curr_jp, level) + 1; 
 
                     // JBL -> JLL
-                    if(level != root_level && (node_pop1 - 1) <= memory::branch_to_leaf_threshold(level)) {
+                    if(level != root_level && (node_pop1 - 1) <= memory::branch_to_leaf_threshold<JudyPolicy>(level)) {
                         /* JBL -> JLL */
                         if(!index_under_branch<JudyPolicy>(curr_jp, index, level)) {
                             return CoreResult{ OpStatus::not_found, nullptr };
@@ -2632,7 +2677,7 @@ namespace judy {
                     JBB* jbb = get_ptr<JBB>(curr_jp->node.addr);
                     node_pop1 = get_pop0(curr_jp, level) + 1; 
                     
-                    if(level != root_level && (node_pop1 - 1) <= memory::branch_to_leaf_threshold(level)) {
+                    if(level != root_level && (node_pop1 - 1) <= memory::branch_to_leaf_threshold<JudyPolicy>(level)) {
                         /* JBB -> JLL */
                         if(!index_under_branch<JudyPolicy>(curr_jp, index, level)) {
                             return CoreResult{ OpStatus::not_found, nullptr };
@@ -2680,7 +2725,7 @@ namespace judy {
                     } else if(MemoryPolicy::can_delete_inplace(pop1, sizeof(JP))) {
                         delete_inplace<JP>(pointers, pop1, sizeof(JP), offset);
                     } else {
-                        JP* new_arr = delete_with_realloc<JP>(pointers, pop1, sizeof(JP), offset);
+                        JP* new_arr = delete_with_realloc<JP, MemoryPolicy>(pointers, pop1, sizeof(JP), offset);
                         if(!new_arr) {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
@@ -2707,7 +2752,7 @@ namespace judy {
                     }
                     else if(pop1 <= memory::branch_bitmap_to_linear_threshold()) {
                         // jbb_to_jbl
-                        bool res = jbb_to_jbl(curr_jp, level);
+                        bool res = jbb_to_jbl<MemoryPolicy>(curr_jp, level);
                         if(!res) {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
@@ -2727,7 +2772,7 @@ namespace judy {
                     JBU* jbu = get_ptr<JBU>(curr_jp->node.addr);
                     node_pop1 = get_pop0(curr_jp, level) + 1; 
                     
-                    if(level != root_level && (node_pop1 - 1) <= memory::branch_to_leaf_threshold(level)) {
+                    if(level != root_level && (node_pop1 - 1) <= memory::branch_to_leaf_threshold<JudyPolicy>(level)) {
                         /* JBU -> JLL */
                         if(!index_under_branch<JudyPolicy>(curr_jp, index, level)) {
                             return CoreResult{ OpStatus::not_found, nullptr };
@@ -2765,7 +2810,7 @@ namespace judy {
                             }
 
                             if(pop1 <= memory::branch_uncompressed_to_bitmap_threshold()) {
-                                bool res = jbu_to_jbb(curr_jp, level);
+                                bool res = jbu_to_jbb<MemoryPolicy>(curr_jp, level);
                                 if(!res) {
                                     arr->error.type = ErrorType::NoMem;
                                     return CoreResult{ OpStatus::error, nullptr };
@@ -2780,7 +2825,7 @@ namespace judy {
                             }
 
                             if(pop1 <= memory::branch_uncompressed_to_linear_threshold()) {
-                                bool res = jbu_to_jbl(curr_jp, level);
+                                bool res = jbu_to_jbl<MemoryPolicy>(curr_jp, level);
                                 if(!res) {
                                     arr->error.type = ErrorType::NoMem;
                                     return CoreResult{ OpStatus::error, nullptr };
@@ -2809,15 +2854,17 @@ namespace judy {
                         return CoreResult{ OpStatus::not_found, nullptr };
                     }
 
-                    word8_t* jll = get_ptr<word8_t>(curr_jp->node.addr);
-                    SearchResult search = leaf_binary_search<word8_t>(JudyPolicy::jll_keys(jll, level, pop1), pop1, level, index);
+                    void* jll = get_ptr<word8_t>(curr_jp->node.addr);
+                    word8_t* jll_keys = JudyPolicy::jll_keys(jll, level, pop1);
+                    word_t* jll_values = JudyPolicy::template jll_values<MemoryPolicy>(jll, level, pop1);
+                    SearchResult search = leaf_binary_search<word8_t>(JudyPolicy::jll_keys(jll_keys, level, pop1), pop1, level, index);
 
                     if(!search.found) {
                         return CoreResult{ OpStatus::not_found, nullptr };
                     }
 
                     // jll->jll_up_level
-                    if((parent_level - 1) > level && (pop1 == memory::leaf_max_pop1(level + 1))) {
+                    if((parent_level - 1) > level && (pop1 == memory::leaf_max_pop1<JudyPolicy>(level + 1))) {
                         std::size_t need_words = JudyPolicy::jll_words(level + 1, pop1);
                         std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
                         word8_t* new_jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
@@ -2828,7 +2875,7 @@ namespace judy {
 
                         std::size_t pos = 0;
                         // jll free inside
-                        copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(new_jll, pos, get_byte(index, level), curr_jp, level + 1);
+                        copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(new_jll, pos, get_byte(index, level), curr_jp, level + 1, pop1);
                     
                         set_jp(curr_jp, reinterpret_cast<word_t>(new_jll), get_decode(curr_jp, level + 1),
                             pop1 - 1, types::JLL_Level(level + 1), level + 1);
@@ -2839,14 +2886,29 @@ namespace judy {
                     // jll IMMED
                     if((pop1 - 1) == JudyPolicy::immed_max_cnt(level)) {
                         if(pop1 == 2)  {
+                            word_t value = 0;
+                            if constexpr(JudyPolicy::has_values) {
+                                word_t* old_values = JudyPolicy::template jll_values<MemoryPolicy>(jll, level, pop1);
+                                value = old_values[(search.pos ? 0 : 1)];
+                            }
                             word_t immed_key = 0;
-                            std::memcpy(&immed_key, jll + (search.pos ? 0 : level), level);
+                            std::memcpy(&immed_key, jll_keys + (search.pos ? 0 : level), level);
                             set_null_jp(curr_jp);
-                            set_immed1<JudyPolicy>(curr_jp, immed_key, level, 0);
+                            set_immed1<JudyPolicy>(curr_jp, immed_key, level, value);
                         } else {
-                            delete_copy<word8_t>(JudyPolicy::immed_keys(curr_jp, pop1 - 1), 
-                                                    jll, pop1, level, search.pos);
-                            //delete_copy<word8_t>(curr_jp->immed.keys, jll, pop1, level, search.pos);
+                            if constexpr(JudyPolicy::has_values) {
+                                void* immed_values = MemoryPolicy::allocate((pop1 - 1) * word_size);
+                                if(!immed_values) {
+                                    arr->error.type = ErrorType::NoMem;
+                                    return CoreResult{ OpStatus::error, nullptr };
+                                }
+                                curr_jp->raw.w[0] = reinterpret_cast<word_t>(immed_values);
+                                delete_copy<word_t>(JudyPolicy::immed_values(curr_jp, pop1 - 1),
+                                                        jll_values, pop1, word_size, search.pos);
+                            }
+
+                            delete_copy<word8_t>(JudyPolicy::immed_keys(curr_jp, pop1), 
+                                                    jll_keys, pop1, level, search.pos);
                         }
 
                         curr_jp->node.type = types::JPImmed_t<JudyPolicy>(level, pop1 - 1);
@@ -2898,16 +2960,40 @@ namespace judy {
                     
                     pop1 = get_pop0(curr_jp, level) + 1;
                                         
-                    // Зануляем сразу чтобы не копировать
-                    JudyPolicy::jlb_clear_bit(jlb, subexpanse, ~bit_pos_mask(digit));
-                    if(JudyPolicy::jlb_bitmap(jlb, subexpanse) == 0) {
-                        JudyPolicy::template jlb_destroy_subexpanse<MemoryPolicy>(jlb, subexpanse);
-                        JudyPolicy::jlb_set_values(jlb, subexpanse, nullptr);
+                    JudyPolicy::jlb_clear_bit(jlb, subexpanse, ~bitmask);
+                    
+                    if constexpr(JudyPolicy::has_values) {
+                        word_t old_bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse) | bitmask;
+                        word_t* old_values = JudyPolicy::jlb_values(jlb, subexpanse);
+                        std::size_t old_subexpanse_pop1 = std::popcount(old_bitmap);
+                        std::size_t offset = std::popcount(old_bitmap & (bitmask - 1));
+                        
+                        if(old_subexpanse_pop1 == 1) {
+                            JudyPolicy::template jlb_destroy_subexpanse<MemoryPolicy>(jlb, subexpanse);
+                            JudyPolicy::jlb_set_values(jlb, subexpanse, nullptr);
+                        } else if(MemoryPolicy::can_delete_inplace(old_subexpanse_pop1, word_size)) { 
+                            delete_inplace<word_t>(old_values, old_subexpanse_pop1, word_size, offset);
+                        } else {
+                            word_t* new_values = delete_with_realloc<word_t, MemoryPolicy>(old_values, old_subexpanse_pop1, word_size, offset);
+                            if(!new_values) {
+                                arr->error.type = ErrorType::NoMem;
+                                return CoreResult{ OpStatus::error, nullptr };
+                            }
+
+                            MemoryPolicy::deallocate(old_values);
+                            JudyPolicy::jlb_set_values(jlb, subexpanse, new_values);
+                        }
+
+                    } else {
+                        if(JudyPolicy::jlb_bitmap(jlb, subexpanse) == 0) {
+                            JudyPolicy::template jlb_destroy_subexpanse<MemoryPolicy>(jlb, subexpanse);
+                            JudyPolicy::jlb_set_values(jlb, subexpanse, nullptr);
+                        }
                     }
                     
                     // jlb->jll_up_level
-                    if((parent_level - 1) > level && (pop1 == memory::leaf_max_pop1(level + 1))) {
-                        std::size_t need_words = ((level + 1) * pop1 + word_size - 1) / word_size;
+                    if((parent_level - 1) > level && (pop1 == memory::leaf_max_pop1<JudyPolicy>(level + 1))) {
+                        std::size_t need_words = JudyPolicy::jll_words(level + 1, pop1 - 1);
                         std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
                         
                         word8_t* new_jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
@@ -2918,7 +3004,7 @@ namespace judy {
 
                         std::size_t pos = 0;
                         // jlb free inside
-                        copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(new_jll, pos, get_byte(index, level), curr_jp, level + 1);
+                        copy_immedleaf_to_jll<JudyPolicy, MemoryPolicy>(new_jll, pos, get_byte(index, level), curr_jp, level + 1, pop1 - 1);
 
                         set_jp(curr_jp, reinterpret_cast<word_t>(new_jll), get_decode(curr_jp, level + 1),
                             pop1 - 2, types::JLL_Level(level + 1), level + 1);
@@ -2928,18 +3014,37 @@ namespace judy {
 
                     // jlb -> IMMED (when happen?)
                     if((pop1 - 1) == JudyPolicy::immed_max_cnt(level)) {
-                        word8_t* keys = JudyPolicy::immed_keys(curr_jp, pop1 - 1);
+                        word8_t* immed_keys = JudyPolicy::immed_keys(curr_jp, pop1 - 1);
+
+                        if constexpr(JudyPolicy::has_values) {
+                            if(pop1 > 2) {
+                                void* values = MemoryPolicy::allocate((pop1 - 1) * word_size);
+                                if(!values) {
+                                    arr->error.type = ErrorType::NoMem;
+                                    return CoreResult{ OpStatus::error, nullptr };
+                                }
+                                curr_jp->raw.w[0] = reinterpret_cast<word_t>(values);
+                            }
+                        }
+                        word_t* immed_values = JudyPolicy::immed_values(curr_jp, pop1 - 1);
+
                         //word8_t* keys = curr_jp->immed.keys;
                         std::size_t pos = 0;
 
                         for(subexpanse = 0; subexpanse < SUBEXPANSE_COUNT; ++subexpanse) {
                             word_t bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
-                            
+                            word_t* jlb_values = JudyPolicy::jlb_values(jlb, subexpanse);
+                            std::size_t offset = 0;
+
                             while(bitmap) {
                                 const std::size_t first_bit = std::countr_zero(bitmap);
                                 const word8_t digit = static_cast<word_t>(subexpanse * word_bits_size + first_bit);
 
-                                keys[pos++] = digit;
+                                immed_keys[pos] = digit;
+                                if constexpr(JudyPolicy::has_values) {
+                                    immed_values[pos] = jlb_values[offset++];
+                                }
+                                ++pos;
 
                                 bitmap &= (bitmap - 1);
                             }
@@ -2952,8 +3057,8 @@ namespace judy {
                     }
 
                     // jlb -> jll
-                    if(pop1 <= memory::leaf_bitmap_to_linear_threshold()) {
-                        std::size_t need_words = JudyPolicy::jll_words(level, pop1);
+                    if((pop1 - 1) <= memory::leaf_bitmap_to_linear_threshold<JudyPolicy>()) {
+                        std::size_t need_words = JudyPolicy::jll_words(level, pop1 - 1);
                         std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
                         
                         word8_t* jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
@@ -2961,8 +3066,8 @@ namespace judy {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
                         } 
-                        word8_t* jll_keys = JudyPolicy::jll_keys(jll, level, pop1);
-                        word_t* jll_values = JudyPolicy::template jll_values<MemoryPolicy>(jll, level, pop1);
+                        word8_t* jll_keys = JudyPolicy::jll_keys(jll, level, pop1 - 1);
+                        word_t* jll_values = JudyPolicy::template jll_values<MemoryPolicy>(jll, level, pop1 - 1);
                         
                         std::size_t pos = 0;
                         std::size_t value_pos = 0;
@@ -2975,7 +3080,9 @@ namespace judy {
                                 std::size_t first_bit = std::countr_zero(bitmap);
                                 word8_t digit = subexpanse * word_bits_size + first_bit;
                                 jll_keys[pos++] = digit;
-                                jll_values[value_pos++] = values[offset++];
+                                if constexpr(JudyPolicy::has_values) {
+                                    jll_values[value_pos++] = values[offset++];
+                                }
 
                                 bitmap &= (bitmap - 1);
                             }
@@ -3043,6 +3150,7 @@ namespace judy {
                     }
 
                     word8_t* keys = JudyPolicy::immed_keys(curr_jp, cnt);
+                    word_t* values = JudyPolicy::immed_values(curr_jp, cnt);
                     //SearchResult search = leaf_linear_search<word8_t>(curr_jp->immed.keys, cnt, k, 
                     //                                                index);
                     SearchResult search = leaf_linear_search<word8_t>(keys, cnt, k, index);
@@ -3052,18 +3160,29 @@ namespace judy {
                     }
                     
                     if(cnt == 2) {
-                        word_t first_key = 0, immed_key = 0;
+                        word_t first_key = 0, immed_key = 0, value = 0;
                         std::memcpy(&first_key, keys, k);
-                        //std::memcpy(&first_key, curr_jp->immed.keys, k);
                         offset = (first_key == (index & first_n_bytes_mask(k)));
-                        
                         std::memcpy(&immed_key, keys + (offset ? k : 0), k);
-                        //std::memcpy(&immed_key, curr_jp->immed.keys + (offset ? k : 0), k);
-                        set_immed1<JudyPolicy>(curr_jp, immed_key, k, 0);
+
+                        if constexpr(JudyPolicy::has_values) {
+                            value = values[(search.pos ? 0 : 1)];
+                            MemoryPolicy::deallocate(values);
+                        }
+                        set_immed1<JudyPolicy>(curr_jp, immed_key, k, value);
                     } else {
                         // delete from JPIMMED
+                        if constexpr(JudyPolicy::has_values) {
+                            word_t* new_values = static_cast<word_t*>(MemoryPolicy::allocate((cnt - 1) * word_size));
+                            if(!new_values) {
+                                arr->error.type = ErrorType::NoMem;
+                                return CoreResult{ OpStatus::error, nullptr };
+                            }
+                            delete_copy<word_t>(new_values, values, cnt, word_size, search.pos);
+                            MemoryPolicy::deallocate(values);
+                            curr_jp->raw.w[0] = reinterpret_cast<word_t>(new_values);
+                        }
                         delete_inplace<word8_t>(keys, cnt, k, search.pos);
-                        //delete_inplace<word8_t>(curr_jp->immed.keys, cnt, k, search.pos);
                         curr_jp->node.type = types::JPImmed_t<JudyPolicy>(k, cnt - 1);
                     }
                     goto WalkExit;
