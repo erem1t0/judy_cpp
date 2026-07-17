@@ -1,6 +1,6 @@
 # judy_cpp
 
-Current Version `v0.4.1`
+Current Version `v0.4.2`
 
 This is a modern header-only Judy Array C++ 20 library with parameter settings and templates.
 
@@ -13,11 +13,12 @@ Already done:
     - get
     - insert
     - erase
+- JudyL:
+    - get
+    - insert
 
 Upcoming:
 - JudyL
-    - get
-    - insert
     - erase
 - RLL logic
 
