@@ -89,8 +89,6 @@ static_assert(BRANCH_LINEAR_MAX <= EXPANSE_COUNT && BRANCH_BITMAP_MAX <= EXPANSE
 
 namespace judy {
 
-    static std::size_t TOTAL_MEMORY = 0;
-
     using word_t = std::uintptr_t;
 
     using word8_t  = std::uint8_t;
@@ -253,16 +251,15 @@ namespace judy {
     // For inheritance
     struct BaseMemoryPolicy {
         static void* allocate(std::size_t size) { return std::malloc(size); }
-        static void deallocate(void* ptr, std::size_t) { std::free(ptr); }
-        static bool can_insert_inplace(std::size_t, std::size_t) { return false; }
-        static bool can_delete_inplace(std::size_t, std::size_t) { return false; }
+        static void deallocate(void* ptr, std::size_t /*size*/) { std::free(ptr); }
+        static bool can_insert_inplace(std::size_t count, std::size_t element_size) { return false; }
+        static bool can_delete_inplace(std::size_t count, std::size_t element_size) { return false; }
         std::size_t get_capacity(std::size_t size) { return size; }
     };
 
     struct DefaultMemoryPolicy {
 
         static void* allocate(std::size_t size) {
-            TOTAL_MEMORY += size;
             return std::malloc(size);
         }
 
@@ -348,6 +345,24 @@ namespace judy {
     };
 
     namespace memory {
+
+        inline std::size_t words_for_bytes(std::size_t bytes) {
+            return (bytes + word_size - 1) / word_size;
+        }
+
+        template<JudyMemoryPolicy MemoryPolicy> 
+        std::size_t allocation_bytes(std::size_t count, std::size_t element_size) {
+            std::size_t need_words = words_for_bytes(count * element_size);
+            std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+            return need_capacity;
+        }
+
+        template<typename /*policy::JudyArrayPolicy*/ JudyPolicy, JudyMemoryPolicy MemoryPolicy>
+        std::size_t jll_allocation_bytes(std::size_t pop1, std::size_t level) {
+            std::size_t need_words = JudyPolicy::jll_words(level, pop1);
+            std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+            return need_capacity;
+        }
 
         // nullptr check outside
         template<typename T>
@@ -445,9 +460,7 @@ namespace judy {
                             std::size_t subexpanse, word_t bitmask, word_t* pointer, std::size_t level, 
                             std::size_t pop1, std::size_t pos, word_t index, word8_t type) {
             
-            // bools
             { Policy::has_values }      -> std::convertible_to<bool>;
-
             { Policy::jll_max_cache_lines } -> std::convertible_to<std::size_t>;
 
             // JPImmed
@@ -456,11 +469,6 @@ namespace judy {
             { Policy::immed_keys(  cjp, pop1) } -> std::same_as<const word8_t*>;
             { Policy::immed_values( jp, pop1) } -> std::same_as<word_t*>;
             { Policy::immed_values(cjp, pop1) } -> std::same_as<const word_t*>;
-            //{ Policy::immed_set_value() }       -> std::same_as<void>;
-
-            //{ Policy::immed_type(level, pop1) }       -> std::same_as<word8_t>;
-            //{ Policy::immed_pop1(type) }              -> std::same_as<std::size_t>;
-            // Judy1: nullptr, JudyL: 1 - 1 word, 2+ - area of values
 
             // JLL
             { Policy::jll_key_words(level, pop1) }      -> std::same_as<std::size_t>;
@@ -471,7 +479,6 @@ namespace judy {
             { Policy::template jll_can_insert_inplace<DefaultMemoryPolicy>(level, pop1) }   -> std::convertible_to<bool>;
             { Policy::template jll_can_delete_inplace<DefaultMemoryPolicy>(level, pop1) }   -> std::convertible_to<bool>;
             
-
             // JLB
             { Policy::jlb_bitmap   (cjlb,   subexpanse) }          -> std::same_as<word_t>;
             { Policy::jlb_values   (cjlb,   subexpanse) }          -> std::same_as<word_t*>;
@@ -482,10 +489,6 @@ namespace judy {
 
             { Policy::template jlb_destroy_subexpanse<DefaultMemoryPolicy>(jlb, subexpanse) } -> std::same_as<void>;
             { Policy::template jlb_destroy<DefaultMemoryPolicy>(jlb) }                        -> std::same_as<void>;
-            
-
-            // ret
-            
 
         };  
         
@@ -494,13 +497,28 @@ namespace judy {
             using JLB = Judy1JLB;
 
             static constexpr bool has_values = false;
-
             static constexpr std::size_t jll_max_cache_lines = JUDY1_LEAF_LINEAR_CL_MAX;
 
             static constexpr word8_t immed_max_cnt(std::size_t k) {
                 return static_cast<word8_t>((2 * word_size - 1) / k);
-            }           
-            
+            }
+
+            static const word8_t* immed_keys(const JP* jp, std::size_t pop1) {
+                return reinterpret_cast<const word8_t*>(pop1 == 1 ? &jp->raw.w[1] : &jp->raw.w[0]);
+            }
+
+            static word8_t* immed_keys(JP* jp, std::size_t pop1) {
+                return const_cast<word8_t*>(immed_keys(static_cast<const JP*>(jp), pop1));
+            }
+
+            static const word_t* immed_values(const JP* jp, std::size_t pop1) {
+                return nullptr;
+            }
+
+            static word_t* immed_values(JP* jp, std::size_t pop1) {
+                return nullptr;
+            }
+
             static word_t jlb_bitmap(const JLB* jlb, std::size_t subexpanse) {
                 return jlb->subexpanses[subexpanse];
             }
@@ -535,23 +553,7 @@ namespace judy {
                 for(std::size_t subexpanse = 0; subexpanse < SUBEXPANSE_COUNT; ++ subexpanse) {
                     jlb_destroy_subexpanse<MemoryPolicy>(jlb, subexpanse);
                 }
-                MemoryPolicy::deallocate(jlb);
-            }
-
-            static const word8_t* immed_keys(const JP* jp, std::size_t pop1) {
-                return reinterpret_cast<const word8_t*>(pop1 == 1 ? &jp->raw.w[1] : &jp->raw.w[0]);
-            }
-
-            static word8_t* immed_keys(JP* jp, std::size_t pop1) {
-                return const_cast<word8_t*>(immed_keys(static_cast<const JP*>(jp), pop1));
-            }
-
-            static const word_t* immed_values(const JP* jp, std::size_t pop1) {
-                return nullptr;
-            }
-            
-            static word_t* immed_values(JP* jp, std::size_t pop1) {
-                return nullptr;
+                MemoryPolicy::deallocate(jlb, sizeof(JLB));
             }
 
             static constexpr std::size_t jll_key_words(std::size_t level, std::size_t pop1) {
@@ -628,9 +630,10 @@ namespace judy {
 
             template<JudyMemoryPolicy MemoryPolicy>
             static void jlb_destroy_subexpanse(JLB* jlb, std::size_t subexpanse) {
-                if(jlb->subexpanses[subexpanse].values) {
-                    MemoryPolicy::deallocate(jlb->subexpanses[subexpanse].values);
-                    jlb->subexpanses[subexpanse].values = nullptr;
+                word_t* values = jlb_values(jlb, subexpanse);
+                if(values) {
+                    MemoryPolicy::deallocate(values, memory::allocation_bytes<MemoryPolicy>(std::popcount(jlb_bitmap(jlb, subexpanse)), word_size));
+                    jlb_set_values(jlb, subexpanse, nullptr);    
                 }
             }
 
@@ -639,7 +642,7 @@ namespace judy {
                 for(std::size_t subexpanse = 0; subexpanse < SUBEXPANSE_COUNT; ++ subexpanse) {
                     jlb_destroy_subexpanse<MemoryPolicy>(jlb, subexpanse);
                 }
-                MemoryPolicy::deallocate(jlb);
+                MemoryPolicy::deallocate(jlb, sizeof(JLB));
             }
 
             static const word8_t* immed_keys(const JP* jp, std::size_t pop1) {
@@ -1013,11 +1016,8 @@ namespace judy {
         template<typename T, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
         T* insert_with_realloc(T* arr, word_t old_pop1, std::size_t element_size, 
                                const T* element, std::size_t pos) {
-                
-            std::size_t words_need = ((old_pop1 + 1) * element_size + word_size - 1) / word_size;
-            std::size_t new_capacity = MemoryPolicy::get_capacity(words_need) * word_size;
-
-            T* new_arr = static_cast<T*>(MemoryPolicy::allocate(new_capacity));
+            std::size_t need_capacty = memory::allocation_bytes<MemoryPolicy>(old_pop1 + 1, element_size);
+            T* new_arr = static_cast<T*>(MemoryPolicy::allocate(need_capacty));
             
             if(!new_arr) {
                 return nullptr;
@@ -1030,11 +1030,11 @@ namespace judy {
 
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy>
         void* jll_insert_with_realloc(void* jll, std::size_t old_pop1, std::size_t level, 
-                                      const word8_t* key, word_t value, std::size_t pos) {
-            std::size_t words_need = JudyPolicy::jll_words(level, old_pop1 + 1);
-            std::size_t new_capacity = MemoryPolicy::get_capacity(words_need) * word_size;
+                                      const word8_t* key, word_t
+                                       value, std::size_t pos) {
+            std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(old_pop1 + 1, level);
 
-            void* new_jll = MemoryPolicy::allocate(new_capacity);
+            void* new_jll = MemoryPolicy::allocate(need_capacity);
             if(!new_jll) {
                 return nullptr;
             }
@@ -1078,10 +1078,9 @@ namespace judy {
         
         template<typename T, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
         T* delete_with_realloc(T* arr, word_t old_pop1, std::size_t element_size, std::size_t pos) {
-            std::size_t words_need = ((old_pop1 - 1) * element_size + word_size - 1) / word_size;
-            std::size_t new_capacity = MemoryPolicy::get_capacity(words_need) * word_size;
+            std::size_t need_capacity = memory::allocation_bytes<MemoryPolicy>(old_pop1 - 1, element_size);
 
-            T* new_arr = static_cast<T*>(MemoryPolicy::allocate(new_capacity));
+            T* new_arr = static_cast<T*>(MemoryPolicy::allocate(need_capacity));
             if(!new_arr) {
                 return nullptr;
             }
@@ -1093,10 +1092,9 @@ namespace judy {
 
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy>
         void* jll_delete_with_realloc(void* jll, std::size_t old_pop1, std::size_t level, std::size_t pos) {
-            std::size_t words_need = JudyPolicy::jll_words(level, old_pop1 - 1);
-            std::size_t new_capacity = MemoryPolicy::get_capacity(words_need) * word_size;
 
-            void* new_jll = MemoryPolicy::allocate(new_capacity);
+            std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(old_pop1 - 1, level);
+            void* new_jll = MemoryPolicy::allocate(need_capacity);
             if(!new_jll) {
                 return nullptr;
             }
@@ -1117,10 +1115,10 @@ namespace judy {
         template<JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
         inline bool allocate_jbb_pointers(JBB* jbb, word8_t* subexpanse_pops) {
 
+
             for(std::size_t i = 0; i < SUBEXPANSE_COUNT; ++i) {
                 if(subexpanse_pops[i]) {
-                    std::size_t need_words = (subexpanse_pops[i] * sizeof(JP) + word_size - 1) / word_size;
-                    std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+                    std::size_t need_capacity = memory::allocation_bytes<MemoryPolicy>(subexpanse_pops[i], sizeof(JP));
                     JP* new_arr = static_cast<JP*>(MemoryPolicy::allocate(need_capacity));
                     
                     jbb->subexpanses[i].pointers = new_arr;
@@ -1128,7 +1126,7 @@ namespace judy {
                     if(!jbb->subexpanses[i].pointers) {
                         for(word_t j = 0; j < i; ++j) {
                             if(jbb->subexpanses[j].pointers) {
-                                MemoryPolicy::deallocate(jbb->subexpanses[j].pointers);
+                                MemoryPolicy::deallocate(jbb->subexpanses[j].pointers, memory::allocation_bytes<MemoryPolicy>(subexpanse_pops[j], sizeof(JP)));
                             }
                         }
 
@@ -1162,7 +1160,7 @@ namespace judy {
 
             bool res = allocate_jbb_pointers<MemoryPolicy>(jbb, subexpanse_pops);
             if(!res) {
-                MemoryPolicy::deallocate(jbb);
+                MemoryPolicy::deallocate(jbb, sizeof(JBB));
                 return nullptr;
             }
             
@@ -1291,7 +1289,9 @@ namespace judy {
                 
                 if(jp->node.type >= types::JLL_Level(1) && jp->node.type <= types::JLL_Level(root_level - 1)) {
                     word8_t* jll = get_ptr<word8_t>(jp->node.addr);
-                    MemoryPolicy::deallocate(jll);
+                    std::size_t level = jp->node.type - types::JLL_Base + 1;
+                    std::size_t pop1 = get_pop0(jp, level) + 1;
+                    MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                 } else if(jp->node.type == types::JLB_Base) {
                     JLB* jlb = get_ptr<JLB>(jp->node.addr);
                     JudyPolicy::template jlb_destroy<MemoryPolicy>(jlb);
@@ -1322,7 +1322,7 @@ namespace judy {
                 }
 
                 set_jp(jp, reinterpret_cast<word_t>(jlb), old_decode, pop1 - 1, types::JLB_Base, 1);  
-                MemoryPolicy::deallocate(jll);
+                MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                 return true;
             }   
 
@@ -1345,12 +1345,11 @@ namespace judy {
                     word_t new_decode = old_decode | (get_byte(first_key, level - 1) << (CHAR_BIT * child_level));
                     set_jp(jp, reinterpret_cast<word_t>(jlb), new_decode, pop1 - 1, types::JLB_Base, 1);
                     
-                    MemoryPolicy::deallocate(jll);
+                    MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                     return true;
                 }
 
-                std::size_t need_words = JudyPolicy::jll_words(child_level, pop1);
-                std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+                std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, child_level);
 
                 word8_t* new_jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
                 if(!new_jll) {
@@ -1366,7 +1365,7 @@ namespace judy {
                     }
                 }
 
-                MemoryPolicy::deallocate(jll);
+                MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
 
                 word_t new_decode = old_decode | (get_byte(first_key, level - 1) << (CHAR_BIT * child_level));
                 set_jp(jp, reinterpret_cast<word_t>(new_jll), new_decode, pop1 - 1, types::JLL_Level(child_level), child_level);
@@ -1442,9 +1441,8 @@ namespace judy {
                 }
                 // JLL
                 else {
-                    std::size_t need_words = JudyPolicy::jll_words(child_level, subexpanse_pop1);
-                    std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
-                    
+                    std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(subexpanse_pop1, child_level);
+
                     void* new_jll = static_cast<void*>(MemoryPolicy::allocate(need_capacity));
                     if(!new_jll) {
                         free_jll_cascade<JudyPolicy, MemoryPolicy>(pointers, subexpanse);
@@ -1499,7 +1497,7 @@ namespace judy {
                 jp->node.type = types::JBB_Level(level);
             }
             
-            MemoryPolicy::deallocate(jll);
+            MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
 
             return 1;
         }
@@ -1541,7 +1539,7 @@ namespace judy {
                     new_keys[pos + child_level] = top_byte;
                     pos += level;
                 }
-                MemoryPolicy::deallocate(leaf);
+                MemoryPolicy::deallocate(leaf, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, child_level));
             } 
             else if(type >= types::JPImmed_t<JudyPolicy>(child_level, 1) &&
                     type <= types::JPImmed_t<JudyPolicy>(child_level, JudyPolicy::immed_max_cnt(child_level))) {
@@ -1560,7 +1558,7 @@ namespace judy {
                 }
                 if constexpr(JudyPolicy::has_values) {
                     if(pop1 > 1) {
-                        MemoryPolicy::deallocate(old_values);
+                        MemoryPolicy::deallocate(old_values, pop1 * word_size);
                     }
                 }
             }
@@ -1594,7 +1592,7 @@ namespace judy {
 
                 JudyPolicy::template jlb_destroy<MemoryPolicy>(jlb);
             } 
-            else [[unlikely]] /* should never happen */ { 
+            else /* should never happen */ { 
                 assert(false);
             }
         }
@@ -1634,7 +1632,7 @@ namespace judy {
                     
                     bitmap &= (bitmap - 1);
                 }
-                MemoryPolicy::deallocate(pointers);
+                MemoryPolicy::deallocate(pointers, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
             }
         }
          
@@ -1681,7 +1679,7 @@ namespace judy {
                 
                 return JudyPolicy::jlb_bitmap(jlb, subexpanse) & bit_pos_mask(digit);
             } 
-            else [[unlikely]] /* should never happen */ { 
+            else /* should never happen */ { 
                 assert(false);
                 return false;
             }
@@ -1747,8 +1745,7 @@ namespace judy {
         // JB* -> JLL at same level
         template<policy::JudyArrayPolicy JudyPolicy, JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
         bool branch_to_jll(JP* jp, word_t node_pop1, std::size_t level) {
-            std::size_t need_words = JudyPolicy::jll_words(level, node_pop1);
-            std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+            std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(node_pop1, level);
             word8_t* jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
             if(!jll) {
                 return false;
@@ -1757,13 +1754,15 @@ namespace judy {
             // logic
             if(jp->node.type == types::JBL_Level(level)) {
                 jbl_copy_traverse<JudyPolicy, MemoryPolicy>(jp, jll, level, node_pop1);
+                MemoryPolicy::deallocate(get_ptr<void>(jp->node.addr), sizeof(JBL));
             } else if(jp->node.type == types::JBB_Level(level)) {
                 jbb_copy_traverse<JudyPolicy,MemoryPolicy>(jp, jll, level, node_pop1);
+                MemoryPolicy::deallocate(get_ptr<void>(jp->node.addr), sizeof(JBB));
             } else if(jp->node.type == types::JBU_Level(level)) {
                 jbu_copy_traverse<JudyPolicy,MemoryPolicy>(jp, jll, level, node_pop1);
+                MemoryPolicy::deallocate(get_ptr<void>(jp->node.addr), sizeof(JBU));
             } 
             
-            MemoryPolicy::deallocate(get_ptr<void>(jp->node.addr));
             
             set_jp(jp, reinterpret_cast<word_t>(jll), get_decode(jp, level), 
                    node_pop1 - 1, types::JLL_Level(level), level);
@@ -1801,11 +1800,11 @@ namespace judy {
                     bitmap &= (bitmap - 1);
                 }
                 
-                MemoryPolicy::deallocate(pointers);
+                MemoryPolicy::deallocate(pointers, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
             }
             jbl->pop0 = pos - 1;
 
-            MemoryPolicy::deallocate(jbb);
+            MemoryPolicy::deallocate(jbb, sizeof(JBB));
 
             jp->node.addr = reinterpret_cast<word_t>(jbl);
             jp->node.type = types::JBL_Level(level);
@@ -1838,7 +1837,7 @@ namespace judy {
 
             bool res = allocate_jbb_pointers<MemoryPolicy>(jbb, subexpanse_pops);
             if(!res) {
-                MemoryPolicy::deallocate(jbb);
+                MemoryPolicy::deallocate(jbb, sizeof(JBB));
                 return false;
             }
 
@@ -1853,7 +1852,7 @@ namespace judy {
                 jbb->subexpanses[subexpanse].bitmap |= bit_pos_mask(digit);
             }
 
-            MemoryPolicy::deallocate(jbu);
+            MemoryPolicy::deallocate(jbu, sizeof(JBU));
 
             jp->node.addr = reinterpret_cast<word_t>(jbb);
             jp->node.type = types::JBB_Level(level);
@@ -1882,7 +1881,7 @@ namespace judy {
 
             jbl->pop0 = pos - 1;
 
-            MemoryPolicy::deallocate(jbu);
+            MemoryPolicy::deallocate(jbu, sizeof(JBU));
         
             jp->node.addr = reinterpret_cast<word_t>(jbl);
             jp->node.type = types::JBL_Level(level);
@@ -1898,7 +1897,7 @@ namespace judy {
             word_t pop1, total_free = 0;
 
             switch(jp->node.type) {
-                case types::Null_JP: [[unlikely]] {
+                case types::Null_JP: {
                     break;
                 }
                 case types::JBL_Level(2)...types::JBL_Level(root_level): {
@@ -1908,7 +1907,7 @@ namespace judy {
                     for(std::size_t offset = 0; offset < pop1; ++offset) {
                         total_free += free_jp<JudyPolicy, MemoryPolicy>(&jbl->pointers[offset]);
                     }
-                    MemoryPolicy::deallocate(jbl);
+                    MemoryPolicy::deallocate(jbl, sizeof(JBL));
                     break;
                 }
                 case types::JBB_Level(2)...types::JBB_Level(root_level): {
@@ -1923,10 +1922,10 @@ namespace judy {
                         for(std::size_t offset = 0; offset < pop1; ++offset) {
                             total_free += free_jp<JudyPolicy, MemoryPolicy>(&pointers[offset]);
                         }
-                        MemoryPolicy::deallocate(jbb->subexpanses[subexpanse].pointers);
+                        MemoryPolicy::deallocate(jbb->subexpanses[subexpanse].pointers, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
                     }
 
-                    MemoryPolicy::deallocate(jbb);
+                    MemoryPolicy::deallocate(jbb, sizeof(JBB));
                     break;
                 }
                 case types::JBU_Level(2)...types::JBU_Level(root_level): {
@@ -1940,7 +1939,7 @@ namespace judy {
                         total_free += free_jp<JudyPolicy, MemoryPolicy>(&jbu->pointers[digit]);
                     }
 
-                    MemoryPolicy::deallocate(jbu);
+                    MemoryPolicy::deallocate(jbu, sizeof(JBU));
                     break;
                 }
                 case types::JLL_Level(1)...types::JLL_Level(root_level - 1): {
@@ -1949,7 +1948,7 @@ namespace judy {
 
                     word8_t* jll = get_ptr<word8_t>(jp->node.addr);
 
-                    MemoryPolicy::deallocate(jll);
+                    MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                     total_free = pop1;
                     break;
                 }
@@ -1957,7 +1956,7 @@ namespace judy {
                     std::size_t level = root_level;
                     pop1 = get_pop0(jp, level) + 1;
                     void* rll = get_ptr<void>(jp->node.addr);
-                    MemoryPolicy::deallocate(rll);
+                    MemoryPolicy::deallocate(rll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                     total_free = pop1;
                     break;
                 }
@@ -1985,14 +1984,14 @@ namespace judy {
 
                     if constexpr(JudyPolicy::has_values) {
                         if(cnt > 1) {
-                            MemoryPolicy::deallocate(JudyPolicy::immed_values(jp, cnt));
+                            MemoryPolicy::deallocate(JudyPolicy::immed_values(jp, cnt), cnt * word_size);
                         }
                     }
 
                     total_free = cnt;
                     break;
                 }
-                default: [[unlikely]] {
+                default: {
                     assert(false);
                     break;
                 }
@@ -2016,7 +2015,6 @@ namespace judy {
     template<JudyMemoryPolicy MemoryPolicy = DefaultMemoryPolicy>
     JPM* judy_create() {
 
-        TOTAL_MEMORY = 0;
         JPM* jpm = static_cast<JPM*>(MemoryPolicy::allocate(sizeof(JPM)));
         if (!jpm) 
             return nullptr;
@@ -2038,21 +2036,20 @@ namespace judy {
 
         std::size_t stack_pos = 0;
 
-        if(!arr) [[unlikely]] {
+        if(!arr) {
             return CoreResult{ OpStatus::error, nullptr };
         }
 
         JP* curr_jp = &arr->top_jp;
      
-        if(curr_jp->node.type == types::Null_JP) [[unlikely]] {
+        if(curr_jp->node.type == types::Null_JP) {
             /**
              * Note that JBL allocates with trash (no initialization).
              * Since we control the size using pop0 fields and use 
              * linear search, this will allow us not to go beyond the 
              * boundaries or into unwanted garbage.
              */
-            std::size_t need_words = JudyPolicy::jll_words(root_level, 1);
-            std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+            std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(1, root_level);
             void* rll = MemoryPolicy::allocate(need_capacity);
                             
             if(!rll) {
@@ -2129,7 +2126,7 @@ namespace judy {
                             jbu->pointers[digit] = *digit_jp;
                         }
                         
-                        MemoryPolicy::deallocate(jbl);
+                        MemoryPolicy::deallocate(jbl, sizeof(JBL));
 
                         curr_jp->node.addr = reinterpret_cast<word_t>(jbu);
                         curr_jp->node.type = types::JBU_Level(level);
@@ -2178,7 +2175,7 @@ namespace judy {
                             return CoreResult{ OpStatus::error, nullptr };
                         }
 
-                        MemoryPolicy::deallocate(jbl);
+                        MemoryPolicy::deallocate(jbl, sizeof(JBL));
 
                         curr_jp->node.addr = reinterpret_cast<word_t>(jbb);
                         curr_jp->node.type = types::JBB_Level(level);
@@ -2226,6 +2223,7 @@ namespace judy {
                             digit = subexpanse * word_bits_size;
                             
                             bitmap = jbb->subexpanses[subexpanse].bitmap;
+                            pop1 = std::popcount(bitmap);
                             JP* jps = jbb->subexpanses[subexpanse].pointers;
 
                             if(!bitmap) {
@@ -2240,9 +2238,9 @@ namespace judy {
                             for(word_t bit = 0, offset = 0; bit < word_bits_size; ++bit, bitmap >>= 1, ++digit) {
                                 jbu->pointers[digit] = ((bitmap & 1) ? jps[offset++] : null_jp);
                             }
-                            MemoryPolicy::deallocate(jps);
+                            MemoryPolicy::deallocate(jps, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
                         }
-                        MemoryPolicy::deallocate(jbb);
+                        MemoryPolicy::deallocate(jbb, sizeof(JBB));
 
                         arr->lastpop0 = arr->pop0;
 
@@ -2276,10 +2274,8 @@ namespace judy {
                     set_immed1<JudyPolicy>(&new_jp, index, level - 1, 0);
                     JP* inserted_jp = nullptr;
 
-                    std::size_t need_words = ((pop1 + 1) * sizeof(JP) + word_size - 1) / word_size;
-
                     if(!bitmap) {
-                        std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+                        std::size_t need_capacity = memory::allocation_bytes<MemoryPolicy>(pop1 + 1, sizeof(JP));
                         JP* new_pointers = static_cast<JP*>(MemoryPolicy::allocate(need_capacity));
                         if(!new_pointers) {
                             arr->error.type = ErrorType::NoMem;
@@ -2298,7 +2294,7 @@ namespace judy {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
                         }
-                        MemoryPolicy::deallocate(pointers);
+                        MemoryPolicy::deallocate(pointers, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
                         inserted_jp = new_pointers + offset;
                         jbb->subexpanses[subexpanse].pointers = new_pointers;
                     }
@@ -2403,7 +2399,7 @@ namespace judy {
                             result_value = JudyPolicy::template jll_values<MemoryPolicy>(new_jll, level, pop1 + 1) + search.pos;
                         }
                         
-                        MemoryPolicy::deallocate(jll);
+                        MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                         curr_jp->node.addr = reinterpret_cast<word_t>(new_jll);
                     }
 
@@ -2447,7 +2443,7 @@ namespace judy {
                         offset = std::popcount(bitmap & (bit_pos_mask(digit) - 1));
 
                         if(pop1 == 0) {
-                            std::size_t need_capacity = MemoryPolicy::get_capacity(1) * word_size;
+                            std::size_t need_capacity = memory::allocation_bytes<MemoryPolicy>(1, word_size);
                             values = static_cast<word_t*>(MemoryPolicy::allocate(need_capacity));
                             
                             if(!values) {
@@ -2468,7 +2464,7 @@ namespace judy {
                                 return CoreResult{ OpStatus::error, nullptr };
                             }
 
-                            MemoryPolicy::deallocate(values);
+                            MemoryPolicy::deallocate(values, memory::allocation_bytes<MemoryPolicy>(pop1, word_size));
                             values = new_values;
                             JudyPolicy::jlb_set_values(jlb, subexpanse, values);
                             result_value = values + offset;
@@ -2584,9 +2580,8 @@ namespace judy {
                         
                     // jpimmed -> JLL
                     if((cnt + 1) > JudyPolicy::immed_max_cnt(k)) {
-                        std::size_t need_words = JudyPolicy::jll_words(k, cnt + 1);
-                        std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
-                        
+                        std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(cnt + 1, k);
+
                         word8_t* jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
                         if(!jll) {
                             arr->error.type = ErrorType::NoMem;
@@ -2606,7 +2601,7 @@ namespace judy {
                             result_value = new_values + search.pos;
 
                             if(cnt > 1) {
-                                MemoryPolicy::deallocate(old_values);
+                                MemoryPolicy::deallocate(old_values, cnt * word_size);
                             }
                         }
 
@@ -2624,7 +2619,7 @@ namespace judy {
 
                             insert_copy<word_t>(new_values, old_values, cnt, word_size, &value, search.pos);
 
-                            MemoryPolicy::deallocate(old_values);
+                            MemoryPolicy::deallocate(old_values, cnt * word_size);
                             curr_jp->raw.w[0] = reinterpret_cast<word_t>(new_values);
                             result_value = new_values + search.pos;
                         }
@@ -2636,7 +2631,7 @@ namespace judy {
 
                     goto WalkExit;
                 }
-                default: [[unlikely]] {
+                default: {
                     arr->error.type = ErrorType::Corrupt;
                     return CoreResult{ OpStatus::error, nullptr };
                 }
@@ -2680,7 +2675,7 @@ namespace judy {
 
         std::size_t stack_pos = 0;
 
-        if(!arr) [[unlikely]] {
+        if(!arr) {
             return CoreResult{ OpStatus::error, nullptr };
         }
 
@@ -2743,7 +2738,7 @@ namespace judy {
                     delete_inplace<word8_t>(jbl->keys, jbl->pop0 + 1, 1, search.pos);
                     delete_inplace<JP>(jbl->pointers, jbl->pop0 + 1, sizeof(JP), search.pos);
                     if(jbl->pop0 == 0) {
-                        MemoryPolicy::deallocate(jbl);
+                        MemoryPolicy::deallocate(jbl, sizeof(JBL));
                         set_null_jp(curr_jp);
                         if(level == root_level) {
                             arr->pop0 = 0;
@@ -2759,7 +2754,7 @@ namespace judy {
                         // raising JP to parent
                         *curr_jp = jbl->pointers[0];
 
-                        MemoryPolicy::deallocate(jbl);
+                        MemoryPolicy::deallocate(jbl, sizeof(JBL));
                         --stack_pos; // jbl no more exists
                     }
                     goto WalkExit;
@@ -2818,7 +2813,7 @@ namespace judy {
                     }
 
                     if(pop1 == 1) {
-                        MemoryPolicy::deallocate(pointers);
+                        MemoryPolicy::deallocate(pointers, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
                         jbb->subexpanses[subexpanse].pointers = nullptr;
                     } else if(MemoryPolicy::can_delete_inplace(pop1, sizeof(JP))) {
                         delete_inplace<JP>(pointers, pop1, sizeof(JP), offset);
@@ -2828,7 +2823,7 @@ namespace judy {
                             arr->error.type = ErrorType::NoMem;
                             return CoreResult{ OpStatus::error, nullptr };
                         }
-                        MemoryPolicy::deallocate(pointers);
+                        MemoryPolicy::deallocate(pointers, memory::allocation_bytes<MemoryPolicy>(pop1, sizeof(JP)));
                         jbb->subexpanses[subexpanse].pointers = new_arr;
                     }
 
@@ -2845,7 +2840,7 @@ namespace judy {
                     }
 
                     if(pop1 == 0) {
-                        MemoryPolicy::deallocate(jbb);
+                        MemoryPolicy::deallocate(jbb, sizeof(JBB));
                         set_null_jp(curr_jp);
                         if(level == root_level) {
                             arr->pop0 = 0;
@@ -2899,7 +2894,7 @@ namespace judy {
                         jbu->pointers[digit].node.type = types::Null_JP;
 
                         if(get_pop0(curr_jp, level) == 0) {
-                            MemoryPolicy::deallocate(jbu);
+                            MemoryPolicy::deallocate(jbu, sizeof(JBU));
                             set_null_jp(curr_jp);
                             if(level == root_level) {
                                 arr->pop0 = 0;
@@ -2973,8 +2968,7 @@ namespace judy {
 
                     // jll->jll_up_level
                     if((parent_level - 1) > level && (pop1 == memory::leaf_max_pop1<JudyPolicy>(level + 1))) {
-                        std::size_t need_words = JudyPolicy::jll_words(level + 1, pop1);
-                        std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
+                        std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level + 1);
                         word8_t* new_jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
                         if(!new_jll) {
                             arr->error.type = ErrorType::NoMem;
@@ -3020,7 +3014,7 @@ namespace judy {
                         }
 
                         curr_jp->node.type = types::JPImmed_t<JudyPolicy>(level, pop1 - 1);
-                        MemoryPolicy::deallocate(jll);
+                        MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
 
                         goto WalkExit;
                     }
@@ -3039,9 +3033,8 @@ namespace judy {
                         }
                         curr_jp->node.addr = reinterpret_cast<word_t>(new_arr);
                         
-                        MemoryPolicy::deallocate(jll);
+                        MemoryPolicy::deallocate(jll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                     }
-
                     
                     stack_jps[stack_pos] = curr_jp;
                     stack_levels[stack_pos++] = level;
@@ -3065,7 +3058,7 @@ namespace judy {
                     }
 
                     if(pop1 == 1) {
-                        MemoryPolicy::deallocate(rll);
+                        MemoryPolicy::deallocate(rll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                         set_null_jp(&arr->top_jp);
                         return CoreResult{ OpStatus::erased, nullptr };
                     }
@@ -3083,7 +3076,7 @@ namespace judy {
                             return CoreResult{ OpStatus::error, nullptr };
                         }
 
-                        MemoryPolicy::deallocate(rll);
+                        MemoryPolicy::deallocate(rll, memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1, level));
                         curr_jp->node.addr = reinterpret_cast<word_t>(new_rll);
                     }
 
@@ -3122,7 +3115,7 @@ namespace judy {
                         std::size_t offset = std::popcount(old_bitmap & (bitmask - 1));
                         
                         if(old_subexpanse_pop1 == 1) {
-                            JudyPolicy::template jlb_destroy_subexpanse<MemoryPolicy>(jlb, subexpanse);
+                            MemoryPolicy::deallocate(old_values, memory::allocation_bytes<MemoryPolicy>(old_subexpanse_pop1, word_size));
                             JudyPolicy::jlb_set_values(jlb, subexpanse, nullptr);
                         } else if(MemoryPolicy::can_delete_inplace(old_subexpanse_pop1, word_size)) { 
                             delete_inplace<word_t>(old_values, old_subexpanse_pop1, word_size, offset);
@@ -3133,7 +3126,7 @@ namespace judy {
                                 return CoreResult{ OpStatus::error, nullptr };
                             }
 
-                            MemoryPolicy::deallocate(old_values);
+                            MemoryPolicy::deallocate(old_values, memory::allocation_bytes<MemoryPolicy>(old_subexpanse_pop1, word_size));
                             JudyPolicy::jlb_set_values(jlb, subexpanse, new_values);
                         }
 
@@ -3146,9 +3139,7 @@ namespace judy {
                     
                     // jlb->jll_up_level
                     if((parent_level - 1) > level && (pop1 == memory::leaf_max_pop1<JudyPolicy>(level + 1))) {
-                        std::size_t need_words = JudyPolicy::jll_words(level + 1, pop1 - 1);
-                        std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
-                        
+                        std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1 - 1, level + 1);
                         word8_t* new_jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
                         if(!new_jll) {
                             arr->error.type = ErrorType::NoMem;
@@ -3211,9 +3202,8 @@ namespace judy {
 
                     // jlb -> jll
                     if((pop1 - 1) <= memory::leaf_bitmap_to_linear_threshold<JudyPolicy>()) {
-                        std::size_t need_words = JudyPolicy::jll_words(level, pop1 - 1);
-                        std::size_t need_capacity = MemoryPolicy::get_capacity(need_words) * word_size;
-                        
+                        std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, MemoryPolicy>(pop1 - 1, level);
+
                         word8_t* jll = static_cast<word8_t*>(MemoryPolicy::allocate(need_capacity));
                         if(!jll) {
                             arr->error.type = ErrorType::NoMem;
@@ -3292,7 +3282,7 @@ namespace judy {
                     }
                     word_t cnt = curr_jp->node.type - types::JPImmed_t<JudyPolicy>(k, 1) + 1;
 
-                    if(cnt == 1) [[unlikely]] /* should never happened here */{
+                    if(cnt == 1) /* should never happened here */{
                         word_t mask = first_n_bytes_mask(k);
                         if((curr_jp->raw.w[1] & mask) != (index & mask)) {
                             return CoreResult{ OpStatus::not_found, nullptr };
@@ -3320,7 +3310,7 @@ namespace judy {
 
                         if constexpr(JudyPolicy::has_values) {
                             value = values[(search.pos ? 0 : 1)];
-                            MemoryPolicy::deallocate(values);
+                            MemoryPolicy::deallocate(values, cnt * word_size);
                         }
                         set_immed1<JudyPolicy>(curr_jp, immed_key, k, value);
                     } else {
@@ -3332,7 +3322,7 @@ namespace judy {
                                 return CoreResult{ OpStatus::error, nullptr };
                             }
                             delete_copy<word_t>(new_values, values, cnt, word_size, search.pos);
-                            MemoryPolicy::deallocate(values);
+                            MemoryPolicy::deallocate(values, cnt * word_size);
                             curr_jp->raw.w[0] = reinterpret_cast<word_t>(new_values);
                         }
                         delete_inplace<word8_t>(keys, cnt, k, search.pos);
@@ -3340,7 +3330,7 @@ namespace judy {
                     }
                     goto WalkExit;
                 }
-                default: [[unlikely]] {
+                default: {
                     arr->error.type = ErrorType::Corrupt;
                     return CoreResult{ OpStatus::error, nullptr };
                 }
@@ -3377,7 +3367,7 @@ namespace judy {
         using namespace detail;
         using JLB = typename JudyPolicy::JLB;
 
-        if(!arr) [[unlikely]] {
+        if(!arr) {
             return CoreResult{ OpStatus::error, nullptr };
         }
         
@@ -3539,7 +3529,7 @@ namespace judy {
 
                     return CoreResult{ (search.found ? OpStatus::found : OpStatus::not_found), value };
                 }
-                default: [[unlikely]] {
+                default: {
                     arr->error.type = ErrorType::Corrupt;
                     return CoreResult{ OpStatus::error, nullptr };
                 }
@@ -3616,7 +3606,7 @@ namespace judy {
         }
 
         judy_clear_array<JudyPolicy, MemoryPolicy>(jpm);
-        MemoryPolicy::deallocate(jpm);
+        MemoryPolicy::deallocate(jpm, sizeof(JPM));
     }
 
     
