@@ -1,6 +1,6 @@
 # judy_cpp
 
-Current Version `v0.5.1`
+Current Version `v0.5.2`
 
 This is a modern header-only Judy Array C++ 20 library with parameter settings and templates.
 
@@ -17,6 +17,7 @@ Already done:
     - get
     - insert
     - erase
+- Template Allocators
 
 Upcoming:
 
