@@ -31,6 +31,9 @@
 // JUDY1
 #include <stdexcept> 
 
+#include <optional>
+#include <utility>
+
 /*
     TBD: alignment
 
@@ -604,6 +607,12 @@ namespace judy {
         word_t* value; // nullptr for Judy1
     };
 
+    struct BoundCoreResult {
+        OpStatus status;
+        word_t index;
+        word_t* value;
+    };
+
     inline constexpr word_t error_word = ~word_t{0};
 
     inline word_t* error_value() {
@@ -845,69 +854,6 @@ namespace judy {
             }
 
         };
-
-        template<JudyArrayPolicy JudyPolicy>
-        struct JudyReturn;
-
-        template<>
-        struct JudyReturn<Judy1Policy> {
-
-            using get_type = int;
-            using insert_type = int;
-            using erase_type = int;
-
-            static get_type get(CoreResult result) {
-                if(result.status == OpStatus::error) {
-                    return -1;
-                }
-                return (result.status == OpStatus::found ? 1 : 0);
-            }
-
-            static insert_type insert(CoreResult result) {
-                if(result.status == OpStatus::error) {
-                    return -1;
-                }
-                return (result.status == OpStatus::inserted ? 1 : 0);
-            }
-
-            static erase_type erase(CoreResult result) {
-                if(result.status == OpStatus::error) {
-                    return -1;
-                }
-                return (result.status == OpStatus::erased ? 1 : 0);
-            }
-        };
-
-        template<>
-        struct JudyReturn<JudyLPolicy> {
-
-            using get_type = word_t*;
-            using insert_type = word_t*;
-            using erase_type = int;
-
-            static get_type get(CoreResult result) {
-                if(result.status == OpStatus::error) {
-                    return error_value();
-                }
-
-                return (result.status == OpStatus::found ? result.value : nullptr);
-            }
-
-            static insert_type insert(CoreResult result) {
-                if(result.status == OpStatus::error) {
-                    return error_value();
-                }
-                return result.value;
-            }
-
-            static erase_type erase(CoreResult result) {
-                if(result.status == OpStatus::error) {
-                    return -1;
-                }
-                return (result.status == OpStatus::erased ? 1 : 0);
-            }
-        };
-
     };
 
 
@@ -1157,7 +1103,6 @@ namespace judy {
         requires JudyCapacityPolicy<CapacityPolicy>
         T* insert_with_realloc(JPM* jpm, Allocator& alloc, T* arr, word_t old_pop1, std::size_t element_size, 
                                const T* element, std::size_t pos) {
-            std::size_t need_capacty = memory::allocation_bytes<CapacityPolicy>(old_pop1 + 1, element_size);
             T* new_arr = memory::alloc_array<T, CapacityPolicy>(jpm, alloc, old_pop1 + 1);
             if(!new_arr) {
                 return nullptr;
@@ -1174,8 +1119,6 @@ namespace judy {
         void* jll_insert_with_realloc(JPM* jpm, Allocator& alloc, void* jll, std::size_t old_pop1, std::size_t level, 
                                       const word8_t* key, word_t
                                        value, std::size_t pos) {
-            std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, CapacityPolicy>(old_pop1 + 1, level);
-
             void* new_jll = memory::alloc_jll<JudyPolicy, CapacityPolicy>(jpm, alloc, old_pop1 + 1, level);
             if(!new_jll) {
                 return nullptr;
@@ -1901,7 +1844,6 @@ namespace judy {
         requires policy::JudyArrayPolicy<JudyPolicy> &&
         JudyCapacityPolicy<CapacityPolicy>
         bool branch_to_jll(JPM* jpm, Allocator& alloc, JP* jp, word_t node_pop1, std::size_t level) {
-            std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, CapacityPolicy>(node_pop1, level);
             void* jll = memory::alloc_jll<JudyPolicy, CapacityPolicy>(jpm, alloc, node_pop1, level);
             if(!jll) {
                 return false;
@@ -2426,7 +2368,6 @@ namespace judy {
                     JP* inserted_jp = nullptr;
 
                     if(!bitmap) {
-                        std::size_t need_capacity = memory::allocation_bytes<CapacityPolicy>(pop1 + 1, sizeof(JP));
                         JP* new_pointers = memory::alloc_array<JP, CapacityPolicy>(jpm, alloc, pop1 + 1);
                         if(!new_pointers) {
                             jpm->error.type = ErrorType::NoMem;
@@ -2729,8 +2670,6 @@ namespace judy {
                         
                     // jpimmed -> JLL
                     if((cnt + 1) > JudyPolicy::immed_max_cnt(k)) {
-                        std::size_t need_capacity = memory::jll_allocation_bytes<JudyPolicy, CapacityPolicy>(cnt + 1, k);
-
                         void* jll = memory::alloc_jll<JudyPolicy, CapacityPolicy>(jpm, alloc, cnt + 1, k);
                         if(!jll) {
                             jpm->error.type = ErrorType::NoMem;
@@ -2800,14 +2739,6 @@ namespace judy {
         ++jpm->pop0;
         
         return CoreResult{ OpStatus::inserted, result_value };
-    }
-
-    template<typename JudyPolicy, typename CapacityPolicy, typename Allocator>
-    requires policy::JudyArrayPolicy<JudyPolicy> &&
-    JudyCapacityPolicy<CapacityPolicy>
-    typename policy::JudyReturn<JudyPolicy>::insert_type judy_insert(JPM* jpm, Allocator& alloc, const word_t index) {
-        CoreResult result = judy_insert_core<JudyPolicy, CapacityPolicy>(jpm, alloc, index);
-        return policy::JudyReturn<JudyPolicy>::insert(result);
     }
 
     // 0 - already deleted
@@ -3497,14 +3428,6 @@ namespace judy {
         return CoreResult{ OpStatus::erased, nullptr };
     }
 
-    template<typename JudyPolicy, typename CapacityPolicy, typename Allocator>
-    requires policy::JudyArrayPolicy<JudyPolicy> &&
-    JudyCapacityPolicy<CapacityPolicy>
-    typename policy::JudyReturn<JudyPolicy>::erase_type judy_erase(JPM* jpm, Allocator& alloc, const word_t index) {
-        CoreResult result = judy_erase_core<JudyPolicy, CapacityPolicy>(jpm, alloc, index);
-        return policy::JudyReturn<JudyPolicy>::erase(result);    
-    }
-
     // 0 - no index
     // 1 - has index
     // -1 - error (check jpm)
@@ -3686,14 +3609,6 @@ namespace judy {
         }
     }
 
-    template<typename JudyPolicy, typename CapacityPolicy>
-    requires policy::JudyArrayPolicy<JudyPolicy> &&
-    JudyCapacityPolicy<CapacityPolicy>
-    typename policy::JudyReturn<JudyPolicy>::get_type judy_get(JPM* jpm, const word_t index) {
-        CoreResult result = judy_get_core<JudyPolicy, CapacityPolicy>(jpm, index);
-        return policy::JudyReturn<JudyPolicy>::get(result);
-    }
-
     // return popultaion [start_index, end_index]
     // or -1 (if has error - check jpm)
     word_t judy_count(JPM* jpm, const word_t start_index, const word_t end_index) {
@@ -3707,18 +3622,894 @@ namespace judy {
         return 0;
     }
 
-    int judy_next(JPM* jpm, const word_t index) {
+    /**************************************** */
+    inline word_t put_byte(word_t index, std::size_t byte, word_t value) {
+        const word_t mask = detail::first_byte_mask << (byte * CHAR_BIT);
+        return (index & ~mask) | ((value & detail::first_byte_mask) << (byte * CHAR_BIT));
+    }
+
+    inline word_t apply_decode(const JP* jp, word_t prefix, std::size_t level) {
+        const word_t mask = detail::decode_mask(level);
+        return (prefix & ~mask) | (jp->raw.w[1] & mask);
+    }
+
+    inline word_t compose_index(word_t prefix, word_t low_key, std::size_t level) {
+        const word_t low_mask = detail::first_n_bytes_mask(level);
+        return (prefix & ~low_mask) | (low_key & low_mask);
+    }
+
+    inline int compare_decode(const JP* jp, word_t prefix, word_t index, std::size_t level) {
+        const word_t low_mask = detail::first_n_bytes_mask(level);
+        const word_t node_decode = apply_decode(jp, prefix, level) & ~low_mask;
+        const word_t index_decode = index & ~low_mask;
+
+        if(node_decode < index_decode) {
+            return -1;
+        }
+        if(node_decode > index_decode) {
+            return 1;
+        }
         return 0;
     }
 
-    int judy_last(JPM* jpm, const word_t index) {
+    inline int compare_prefix(word_t prefix, word_t index, std::size_t level) {
+        const word_t low_mask = detail::first_n_bytes_mask(level);
+        const word_t node_prefix = prefix & ~low_mask;
+        const word_t index_prefix = index & ~low_mask;
+
+        if(node_prefix < index_prefix) {
+            return -1;
+        }
+        if(node_prefix > index_prefix) {
+            return 1;
+        }
         return 0;
     }
 
-    int judy_prev(JPM* jpm, const word_t index) {
-        return 0;
+    inline BoundCoreResult bound_found(word_t index, word_t* value) {
+        return BoundCoreResult{ OpStatus::found, index, value };
     }
+
+    inline BoundCoreResult bound_not_found() {
+        return BoundCoreResult{ OpStatus::not_found, 0, nullptr };
+    }
+
+    inline BoundCoreResult bound_error() {
+        return BoundCoreResult{ OpStatus::error, 0, nullptr };
+    }
+
+    enum class ExtremeSide {
+        left,
+        right,
+    };
     
+    template<ExtremeSide Side, typename JudyPolicy, typename CapacityPolicy>
+    requires policy::JudyArrayPolicy<JudyPolicy> &&
+    JudyCapacityPolicy<CapacityPolicy>
+    BoundCoreResult extreme_in_jp(JPM* jpm, JP* jp, word_t prefix) {
+        using JLB = typename JudyPolicy::JLB;
+
+        const word8_t type = jp->node.type;
+        if(type == types::Null_JP) {
+            return bound_not_found();
+        }
+
+        else if(type >= types::JBL_Level(2) && type <= types::JBL_Level(root_level)) {
+            std::size_t level = type - types::JBL_Base + 2;
+            JBL* jbl = detail::get_ptr<JBL>(jp->node.addr);
+
+            prefix = apply_decode(jp, prefix, level);
+
+            std::size_t offset;
+            if constexpr(Side == ExtremeSide::left) {
+                offset = 0;
+            } else {
+                offset = jbl->pop0;
+            }
+
+            word_t child_prefix = put_byte(prefix, level - 1, jbl->keys[offset]);
+            return extreme_in_jp<Side, JudyPolicy, CapacityPolicy>(jpm, jbl->pointers + offset, child_prefix);
+        } 
+        
+        else if(type >= types::JBB_Level(2) && type <= types::JBB_Level(root_level)) {
+            std::size_t level = jp->node.type - types::JBB_Base + 2;
+            JBB* jbb = detail::get_ptr<JBB>(jp->node.addr);
+
+            prefix = apply_decode(jp, prefix, level);
+
+            int start_index, end_index, diff;
+            if constexpr(Side == ExtremeSide::left) {
+                start_index = 0;
+                end_index = SUBEXPANSE_COUNT;
+                diff = 1;
+            } else {
+                start_index = SUBEXPANSE_COUNT - 1;
+                end_index = -1;
+                diff = -1;
+            }
+            
+            for(int index = start_index; index != end_index; index += diff) {
+                std::size_t subexpanse = static_cast<std::size_t>(index);
+                word_t bitmap = jbb->subexpanses[subexpanse].bitmap;
+                if(!bitmap) {
+                    continue;
+                }
+                std::size_t offset;
+                word_t bit;
+                if constexpr(Side == ExtremeSide::left) {
+                    offset = 0;
+                    bit = std::countr_zero(bitmap);
+                } else {
+                    offset =  std::popcount(bitmap) - 1;
+                    bit = word_bits_size - 1 - static_cast<word_t>(std::countl_zero(bitmap));
+                }
+
+                word_t digit = subexpanse * word_bits_size + bit;
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                return extreme_in_jp<Side, JudyPolicy, CapacityPolicy>(jpm, pointers + offset, child_prefix);
+            }
+            return bound_error();
+        } 
+        
+        else if(type >= types::JBU_Level(2) && type <= types::JBU_Level(root_level)) {
+            std::size_t level = jp->node.type - types::JBU_Base + 2;
+            JBU* jbu = detail::get_ptr<JBU>(jp->node.addr);
+
+            prefix = apply_decode(jp, prefix, level);
+
+            int start_index, end_index, diff;
+            if constexpr(Side == ExtremeSide::left) {
+                start_index =  0;
+                end_index = EXPANSE_COUNT;
+                diff = 1;
+            } else {
+                start_index = EXPANSE_COUNT - 1;
+                end_index = -1;
+                diff = -1;
+            }
+
+            for(int index = start_index; index != end_index; index += diff) {
+                word_t digit = static_cast<word_t>(index);
+                if(jbu->pointers[digit].node.type == types::Null_JP) {
+                    continue;
+                }
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                return extreme_in_jp<Side, JudyPolicy, CapacityPolicy>(jpm, jbu->pointers + digit, child_prefix);
+            }
+            return bound_error();
+        } 
+        
+        else if(type >= types::JLL_Level(1) && type <= types::RLL) {
+            std::size_t level = jp->node.type - types::JLL_Base + 1;
+            std::size_t pop1 = detail::get_pop0(jp, level) + 1;
+            void* jll = detail::get_ptr<void>(jp->node.addr);
+            word8_t* keys = JudyPolicy::jll_keys(jll, level, pop1);
+            
+
+            std::size_t offset;
+            if constexpr(Side == ExtremeSide::left) {
+                offset = 0;
+            } else {
+                offset = pop1 - 1;
+            }
+            const word_t key = detail::read_key(keys, offset, level);
+
+            prefix = apply_decode(jp, prefix, level);
+            word_t found_index = compose_index(prefix, key, level);
+
+            word_t* value = nullptr;
+            if constexpr(JudyPolicy::has_values) { 
+                word_t* values = JudyPolicy::template jll_values<CapacityPolicy>(jll, level, pop1);
+                value = values + offset;
+            }
+            return bound_found(found_index, value);                
+        } 
+        
+        else if(type == types::JLB_Base) {
+            std::size_t level = 1;
+            JLB* jlb = detail::get_ptr<JLB>(jp->node.addr);
+
+            prefix = apply_decode(jp, prefix, level);
+
+            int start_index, end_index, diff;
+            if constexpr(Side == ExtremeSide::left) {
+                start_index = 0;
+                end_index = SUBEXPANSE_COUNT;
+                diff = 1;
+            } else {
+                start_index = SUBEXPANSE_COUNT - 1;
+                end_index = -1;
+                diff = -1;
+            }
+
+            for(int index = start_index; index != end_index; index += diff) {
+                std::size_t subexpanse = static_cast<std::size_t>(index);
+                word_t bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
+                if(!bitmap) {
+                    continue;
+                }
+
+                std::size_t offset;
+                word_t bit;
+                if constexpr(Side == ExtremeSide::left) {
+                    offset = 0;
+                    bit = std::countr_zero(bitmap);
+                } else {
+                    offset =  std::popcount(bitmap) - 1;
+                    bit = word_bits_size - 1 - static_cast<word_t>(std::countl_zero(bitmap));
+                }
+                
+                word_t digit = subexpanse * word_bits_size + bit;
+                word_t found_index = compose_index(prefix, digit, level);
+                
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                    value = values + offset;
+                }
+                
+                return bound_found(found_index, value);
+            }
+            return bound_error();    
+        } 
+        
+        else if(type == types::JLB_FULL) {
+            std::size_t level = 1;
+            prefix = apply_decode(jp, prefix, level);
+            word_t found_index;
+            if constexpr(Side == ExtremeSide::left) {
+                found_index = compose_index(prefix, 0, level);
+            } else {
+                found_index = compose_index(prefix, EXPANSE_COUNT - 1, level);
+            }
+            return bound_found(found_index, nullptr);
+        } 
+        
+        else if(type >= types::JPIMMED_Base && 
+                  type < types::JP_max_type<JudyPolicy>) {
+            std::size_t k = 1;
+            while(k < types::JP_max_type<JudyPolicy> && 
+                type >= (types::JPIMMED_Base + types::immed_level<JudyPolicy>(k + 1))) {
+                ++k;
+            }
+            std::size_t cnt = type - types::JPImmed_t<JudyPolicy>(k, 1) + 1;
+
+            std::size_t offset;
+            if constexpr(Side == ExtremeSide::left) {
+                offset = 0;
+            } else {
+                offset = cnt - 1;
+            }
+
+            word8_t* keys = JudyPolicy::immed_keys(jp, cnt);
+            word_t* values = JudyPolicy::immed_values(jp, cnt);
+            
+            word_t key = detail::read_key(keys, offset, k);
+
+            word_t found_index = compose_index(prefix, key, k);
+
+            word_t* value = nullptr;
+            if constexpr(JudyPolicy::has_values) {
+                value = values + offset;
+            }
+
+            return bound_found(found_index, value);
+        } 
+        
+        else {
+            jpm->error.type = ErrorType::Corrupt;
+            return bound_error();
+        }
+    }
+
+    template<typename JudyPolicy, typename CapacityPolicy>
+    requires policy::JudyArrayPolicy<JudyPolicy> &&
+    JudyCapacityPolicy<CapacityPolicy>
+    BoundCoreResult leftmost_in_jp(JPM* jpm, JP* jp, word_t prefix) {
+        return extreme_in_jp<ExtremeSide::left, JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+    }
+
+    template<typename JudyPolicy, typename CapacityPolicy>
+    requires policy::JudyArrayPolicy<JudyPolicy> &&
+    JudyCapacityPolicy<CapacityPolicy>
+    BoundCoreResult rightmost_in_jp(JPM* jpm, JP* jp, word_t prefix) {
+        return extreme_in_jp<ExtremeSide::right, JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+    }
+
+    template<typename JudyPolicy, typename CapacityPolicy>
+    requires policy::JudyArrayPolicy<JudyPolicy> &&
+    JudyCapacityPolicy<CapacityPolicy>
+    BoundCoreResult first_ge_in_jp(JPM* jpm, JP* jp, word_t index, word_t prefix) {
+        using JLB = typename JudyPolicy::JLB;
+
+        const word8_t type = jp->node.type;
+
+        if(type == types::Null_JP) {
+            return bound_not_found();
+        }
+
+        if(type >= types::JBL_Level(2) && type <= types::JBL_Level(root_level)) {
+            std::size_t level = type - types::JBL_Base + 2;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp > 0) {
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JBL* jbl = detail::get_ptr<JBL>(jp->node.addr);
+            std::size_t pop1 = jbl->pop0 + 1;
+            word_t target_digit = detail::get_byte(index, level - 1);
+            
+            std::size_t offset = 0;
+            while(offset < pop1 && jbl->keys[offset] < target_digit) {
+                ++offset;
+            }
+
+            while(offset < pop1) {
+                word_t digit = jbl->keys[offset];
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+
+                if(digit == target_digit) {
+                    BoundCoreResult result = first_ge_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbl->pointers + offset, index, child_prefix);
+                    if(result.status != OpStatus::not_found) {
+                        return result;
+                    }
+                } else {
+                    return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbl->pointers + offset, child_prefix);
+                }
+                ++offset;
+            }
+            return bound_not_found();
+        } else if(type >= types::JBB_Level(2) && type <= types::JBB_Level(root_level)) {
+            std::size_t level = type - types::JBB_Base + 2;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp > 0) {
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JBB* jbb = detail::get_ptr<JBB>(jp->node.addr);
+            word_t digit = detail::get_byte(index, level - 1);
+            std::size_t subexpanse = digit / word_bits_size;
+            word_t bitmask = detail::bit_pos_mask(digit);
+            word_t bitmap = jbb->subexpanses[subexpanse].bitmap;
+            
+            if(bitmap & bitmask) {
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                std::size_t offset = std::popcount(bitmap & (bitmask - 1));
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                BoundCoreResult result = first_ge_in_jp<JudyPolicy, CapacityPolicy>(jpm, pointers + offset, index, child_prefix);
+                if(result.status != OpStatus::not_found) {
+                    return result;
+                }
+            }
+            word_t higher = bitmap & ~(bitmask | (bitmask - 1));
+            std::size_t higher_pop1 = std::popcount(higher);
+            if(higher_pop1) {
+                word_t next_bit = std::countr_zero(higher);
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t next_bitmask = detail::bit_pos_mask(next_digit);
+                std::size_t offset = std::popcount(bitmap & (next_bitmask - 1));
+                word_t child_prefix = put_byte(prefix, level - 1, next_digit);
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, pointers + offset, child_prefix);
+            }
+            for(++subexpanse; subexpanse < SUBEXPANSE_COUNT; ++subexpanse) {
+                word_t next_bitmap = jbb->subexpanses[subexpanse].bitmap;
+                if(!next_bitmap) {
+                    continue;
+                }
+                
+                std::size_t offset = 0;
+                word_t next_bit = std::countr_zero(next_bitmap);
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t child_prefix = put_byte(prefix, level - 1, next_digit);
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, pointers + offset, child_prefix);
+            }
+            return bound_not_found();
+        } else if(type >= types::JBU_Level(2) && type <= types::JBU_Level(root_level)) {
+            std::size_t level = type - types::JBU_Base + 2;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp > 0) {
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JBU* jbu = detail::get_ptr<JBU>(jp->node.addr);
+            word_t digit = detail::get_byte(index, level - 1);
+            if(jbu->pointers[digit].node.type != types::Null_JP) {
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                BoundCoreResult result = first_ge_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbu->pointers + digit, index, child_prefix);
+                if(result.status != OpStatus::not_found) {
+                    return result;
+                }
+            }
+
+            for(++digit; digit < EXPANSE_COUNT; ++digit) {
+                if(jbu->pointers[digit].node.type == types::Null_JP) {
+                    continue;
+                }
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbu->pointers + digit, child_prefix);
+
+            }
+            return bound_not_found();
+        } else if(type >= types::JLL_Level(1) && type <= types::RLL) {
+            std::size_t level = type - types::JLL_Base + 1;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp > 0) {
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            word_t pop1 = detail::get_pop0(jp, level) + 1;
+            void* jll = detail::get_ptr<void>(jp->node.addr);
+            word8_t* keys = JudyPolicy::jll_keys(jll, level, pop1);
+            word_t* values = JudyPolicy::template jll_values<CapacityPolicy>(jll, level, pop1);
+            
+            detail::SearchResult search = detail::leaf_binary_search<word8_t>(keys, pop1, level, index);
+
+            if(search.pos == pop1) {
+                return bound_not_found();
+            }
+
+            word_t key = detail::read_key(keys, search.pos, level);
+            word_t* value = nullptr;
+            if constexpr(JudyPolicy::has_values) {
+                value = values + search.pos;
+            }
+            word_t found_index = compose_index(prefix, key, level);
+            return bound_found(found_index, value);
+        } else if(type == types::JLB_Base) {
+            std::size_t level = 1;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp > 0) {
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JLB* jlb = detail::get_ptr<JLB>(jp->node.addr);
+            word_t digit = detail::get_byte(index, level - 1);
+            std::size_t subexpanse = digit / word_bits_size;
+            word_t bitmask = detail::bit_pos_mask(digit);
+
+            word_t bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
+
+            if(bitmap & bitmask) {
+                std::size_t offset = std::popcount(bitmap & (bitmask - 1));
+                word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    value = values + offset;
+                }
+                word_t found_index = compose_index(prefix, digit, level);
+                return bound_found(found_index, value);
+            }
+
+            word_t higher = bitmap & ~(bitmask | (bitmask - 1));
+            std::size_t higher_pop1 = std::popcount(higher);
+            if(higher_pop1) {
+                word_t next_bit = std::countr_zero(higher);
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t next_bitmask = detail::bit_pos_mask(next_digit);
+                std::size_t offset = std::popcount(bitmap & (next_bitmask - 1));
+                word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    value = values + offset;
+                }
+                word_t found_index = compose_index(prefix, next_digit, level);
+                return bound_found(found_index, value);
+            }
+            for(++subexpanse; subexpanse < SUBEXPANSE_COUNT; ++subexpanse) {
+                word_t next_bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
+                if(!next_bitmap) {
+                    continue;
+                }
+                
+                std::size_t offset = 0;
+                word_t next_bit = std::countr_zero(next_bitmap);
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    value = values + offset;
+                }    
+                word_t found_index = compose_index(prefix, next_digit, level);
+                return bound_found(found_index, value);
+            }
+            
+            return bound_not_found();
+        } else if(type == types::JLB_FULL) {
+            std::size_t level = 1;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            word_t digit = (decode_cmp > 0 ? 0 : detail::get_byte(index, level - 1));
+            word_t found_index = compose_index(prefix, digit, level);
+            return bound_found(found_index, nullptr);
+        } else if(type >= types::JPIMMED_Base 
+               && type < types::JP_max_type<JudyPolicy>) {
+
+            std::size_t k = 1;
+            while(k < types::JP_max_type<JudyPolicy> && /* to avoid memory dumps */
+                jp->node.type >= (types::JPIMMED_Base + types::immed_level<JudyPolicy>(k + 1))) {
+                ++k;
+            }
+            std::size_t cnt = jp->node.type - types::JPImmed_t<JudyPolicy>(k, 1) + 1;
+
+            int decode_cmp = compare_prefix(prefix, index, k);
+            if(decode_cmp < 0) {
+                return bound_not_found();
+            }
+
+            if(decode_cmp > 0) {
+                return leftmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            word8_t* keys = JudyPolicy::immed_keys(jp, cnt);
+            word_t* values = JudyPolicy::immed_values(jp, cnt);
+
+            detail::SearchResult search = detail::leaf_linear_search<word8_t>(keys, cnt, k, index);
+            if(search.pos == cnt) {
+                return bound_not_found();
+            }
+            word_t* value = nullptr;
+            if constexpr(JudyPolicy::has_values) {
+                value = values + search.pos;
+            }
+            word_t key = detail::read_key(keys, search.pos, k);
+            word_t found_index = compose_index(prefix, key, k);
+            return bound_found(found_index, value);
+        } else {    
+            jpm->error.type = ErrorType::Corrupt;
+            return bound_error();
+        }
+    }
+
+
+    inline word_t highest_bit_index(word_t bitmap) {
+        return word_bits_size - 1 - static_cast<word_t>(std::countl_zero(bitmap));
+    }
+
+    template<typename JudyPolicy, typename CapacityPolicy>
+    requires policy::JudyArrayPolicy<JudyPolicy> &&
+    JudyCapacityPolicy<CapacityPolicy>
+    BoundCoreResult first_le_in_jp(JPM* jpm, JP* jp, word_t index, word_t prefix) {
+        using JLB = typename JudyPolicy::JLB;
+
+        const word8_t type = jp->node.type;
+
+        if(type == types::Null_JP) {
+            return bound_not_found();
+        }
+
+        if(type >= types::JBL_Level(2) && type <= types::JBL_Level(root_level)) {
+            std::size_t level = type - types::JBL_Base + 2;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp < 0) {
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JBL* jbl = detail::get_ptr<JBL>(jp->node.addr);
+            std::size_t pop1 = jbl->pop0 + 1;
+            word_t target_digit = detail::get_byte(index, level - 1);
+            
+            std::size_t offset = 0;
+            while(offset < pop1 && jbl->keys[offset] <= target_digit) {
+                ++offset;
+            }
+            if(offset == 0) {
+                return bound_not_found();
+            }
+            --offset;
+            
+            word_t digit = jbl->keys[offset];
+            word_t child_prefix = put_byte(prefix, level - 1, digit);
+            
+            if(digit == target_digit) {
+                BoundCoreResult result = first_le_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbl->pointers + offset, index, child_prefix);
+                if(result.status != OpStatus::not_found) {
+                    return result;
+                }
+
+                if(offset == 0) {
+                    return bound_not_found();
+                }
+                --offset;
+                digit = jbl->keys[offset];
+                child_prefix = put_byte(prefix, level - 1, digit);
+            }
+            
+            return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbl->pointers + offset, child_prefix);   
+        } else if(type >= types::JBB_Level(2) && type <= types::JBB_Level(root_level)) {
+            std::size_t level = type - types::JBB_Base + 2;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp < 0) {
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JBB* jbb = detail::get_ptr<JBB>(jp->node.addr);
+            word_t digit = detail::get_byte(index, level - 1);
+            std::size_t subexpanse = digit / word_bits_size;
+            word_t bitmask = detail::bit_pos_mask(digit);
+            word_t bitmap = jbb->subexpanses[subexpanse].bitmap;
+            
+            if(bitmap & bitmask) {
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                std::size_t offset = std::popcount(bitmap & (bitmask - 1));
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                BoundCoreResult result = first_le_in_jp<JudyPolicy, CapacityPolicy>(jpm, pointers + offset, index, child_prefix);
+                if(result.status != OpStatus::not_found) {
+                    return result;
+                }
+            }
+
+            word_t lower = bitmap & (bitmask - 1);
+            std::size_t lower_pop1 = std::popcount(lower);
+            if(lower_pop1) {
+                word_t next_bit = highest_bit_index(lower);
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t next_bitmask = detail::bit_pos_mask(next_digit);
+                std::size_t offset = std::popcount(bitmap & (next_bitmask - 1));
+                word_t child_prefix = put_byte(prefix, level - 1, next_digit);
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, pointers + offset, child_prefix);
+            }
+
+            for(int idx = static_cast<int>(subexpanse) - 1; idx >= 0; --idx) {
+                subexpanse = static_cast<std::size_t>(idx);
+                word_t next_bitmap = jbb->subexpanses[subexpanse].bitmap;
+                if(!next_bitmap) {
+                    continue;
+                }
+                
+                word_t next_bit = highest_bit_index(next_bitmap);
+                std::size_t offset = std::popcount(next_bitmap) - 1;
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t child_prefix = put_byte(prefix, level - 1, next_digit);
+                JP* pointers = jbb->subexpanses[subexpanse].pointers;
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, pointers + offset, child_prefix);
+            }
+            return bound_not_found();
+        } else if(type >= types::JBU_Level(2) && type <= types::JBU_Level(root_level)) {
+            std::size_t level = type - types::JBU_Base + 2;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp < 0) {
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JBU* jbu = detail::get_ptr<JBU>(jp->node.addr);
+            word_t digit = detail::get_byte(index, level - 1);
+            if(jbu->pointers[digit].node.type != types::Null_JP) {
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                BoundCoreResult result = first_le_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbu->pointers + digit, index, child_prefix);
+                if(result.status != OpStatus::not_found) {
+                    return result;
+                }
+            }
+
+
+            for(int idx = static_cast<int>(digit) - 1; idx >= 0; --idx) {
+                digit = static_cast<std::size_t>(idx);
+                if(jbu->pointers[digit].node.type == types::Null_JP) {
+                    continue;
+                }
+                word_t child_prefix = put_byte(prefix, level - 1, digit);
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jbu->pointers + digit, child_prefix);
+
+            }
+            return bound_not_found();
+        } else if(type >= types::JLL_Level(1) && type <= types::RLL) {
+            std::size_t level = type - types::JLL_Base + 1;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp < 0) {
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            word_t pop1 = detail::get_pop0(jp, level) + 1;
+            void* jll = detail::get_ptr<void>(jp->node.addr);
+            word8_t* keys = JudyPolicy::jll_keys(jll, level, pop1);
+            word_t* values = JudyPolicy::template jll_values<CapacityPolicy>(jll, level, pop1);
+            
+            detail::SearchResult search = detail::leaf_binary_search<word8_t>(keys, pop1, level, index);
+        
+            std::size_t offset = search.pos;
+            if(!search.found) {
+                if(search.pos == 0) {
+                    return bound_not_found();
+                }
+                offset = search.pos - 1;
+            }
+
+            word_t key = detail::read_key(keys, offset, level);
+            word_t* value = nullptr;
+            if constexpr(JudyPolicy::has_values) {
+                value = values + offset;
+            }
+            word_t found_index = compose_index(prefix, key, level);
+            return bound_found(found_index, value);
+        } else if(type == types::JLB_Base) {
+            std::size_t level = 1;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            if(decode_cmp < 0) {
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            JLB* jlb = detail::get_ptr<JLB>(jp->node.addr);
+            word_t digit = detail::get_byte(index, level - 1);
+            std::size_t subexpanse = digit / word_bits_size;
+            word_t bitmask = detail::bit_pos_mask(digit);
+
+            word_t bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
+
+            if(bitmap & bitmask) {
+                std::size_t offset = std::popcount(bitmap & (bitmask - 1));
+                word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    value = values + offset;
+                }
+                word_t found_index = compose_index(prefix, digit, level);
+                return bound_found(found_index, value);
+            }
+
+            word_t lower = bitmap & (bitmask - 1);
+            std::size_t lower_pop1 = std::popcount(lower);
+            if(lower_pop1) {
+                word_t next_bit = highest_bit_index(lower);
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t next_bitmask = detail::bit_pos_mask(next_digit);
+                std::size_t offset = std::popcount(bitmap & (next_bitmask - 1));
+                word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    value = values + offset;
+                }
+                word_t found_index = compose_index(prefix, next_digit, level);
+                return bound_found(found_index, value);
+            }
+
+
+            for(int idx = static_cast<int>(subexpanse) - 1; idx >= 0; --idx) {
+                subexpanse = static_cast<std::size_t>(idx);
+                word_t next_bitmap = JudyPolicy::jlb_bitmap(jlb, subexpanse);
+                if(!next_bitmap) {
+                    continue;
+                }
+                
+                word_t next_bit = highest_bit_index(next_bitmap);
+                std::size_t offset = std::popcount(next_bitmap) - 1;
+                word_t next_digit = subexpanse * word_bits_size + next_bit;
+                word_t* values = JudyPolicy::jlb_values(jlb, subexpanse);
+                word_t* value = nullptr;
+                if constexpr(JudyPolicy::has_values) {
+                    value = values + offset;
+                }    
+                word_t found_index = compose_index(prefix, next_digit, level);
+                return bound_found(found_index, value);
+            }
+            
+            return bound_not_found();
+        } else if(type == types::JLB_FULL) {
+            std::size_t level = 1;
+            int decode_cmp = compare_decode(jp, prefix, index, level);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            prefix = apply_decode(jp, prefix, level);
+
+            word_t digit = (decode_cmp < 0 ? (EXPANSE_COUNT - 1) : detail::get_byte(index, level - 1));
+            word_t found_index = compose_index(prefix, digit, level);
+            return bound_found(found_index, nullptr);
+        } else if(type >= types::JPIMMED_Base 
+               && type < types::JP_max_type<JudyPolicy>) {
+
+            std::size_t k = 1;
+            while(k < types::JP_max_type<JudyPolicy> && /* to avoid memory dumps */
+                jp->node.type >= (types::JPIMMED_Base + types::immed_level<JudyPolicy>(k + 1))) {
+                ++k;
+            }
+            std::size_t cnt = jp->node.type - types::JPImmed_t<JudyPolicy>(k, 1) + 1;
+
+            int decode_cmp = compare_prefix(prefix, index, k);
+            if(decode_cmp > 0) {
+                return bound_not_found();
+            }
+
+            if(decode_cmp < 0) {
+                return rightmost_in_jp<JudyPolicy, CapacityPolicy>(jpm, jp, prefix);
+            }
+
+            word8_t* keys = JudyPolicy::immed_keys(jp, cnt);
+            word_t* values = JudyPolicy::immed_values(jp, cnt);
+
+            detail::SearchResult search = detail::leaf_linear_search<word8_t>(keys, cnt, k, index);
+
+            std::size_t offset = search.pos;
+            if(!search.found) {    
+                if(search.pos == 0) {
+                    return bound_not_found();
+                }
+                offset = search.pos - 1;
+            }
+
+            word_t* value = nullptr;
+            if constexpr(JudyPolicy::has_values) {
+                value = values + offset;
+            }
+            word_t key = detail::read_key(keys, offset, k);
+            word_t found_index = compose_index(prefix, key, k);
+            return bound_found(found_index, value);
+        } else {    
+            jpm->error.type = ErrorType::Corrupt;
+            return bound_error();
+        }
+    }
+
     int judy_first_empty(JPM* jpm, const word_t index) {
         return 0;
     }
@@ -3772,75 +4563,85 @@ namespace judy {
     requires JudyCapacityPolicy<CapacityPolicy>
     class Judy1 {
     public:
-
         using JudyPolicy = policy::Judy1Policy;
 
         Judy1()  {
-            jpm_ = judy::judy_create(alloc_);
+            jpm_ = judy_create(alloc_);
             if(!jpm_) {
                 ;// throw? or outside should check
             }
         }
 
-        int get(const judy::word_t index) const {
-            return judy::judy_get<JudyPolicy, CapacityPolicy>(jpm_, index);
+        int get(const word_t index) const {
+            CoreResult result = judy_get_core<JudyPolicy, CapacityPolicy>(jpm_, index);
+            if(result.status == OpStatus::error) {
+                    return -1;
+                }
+            return (result.status == OpStatus::found ? 1 : 0);
         }
 
-        int insert(const judy::word_t index) {
-            return judy::judy_insert<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+        int insert(const word_t index) {
+            CoreResult result = judy_insert_core<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+            if(result.status == OpStatus::error) {
+                return -1;
+            }
+            return (result.status == OpStatus::inserted ? 1 : 0);    
         }
 
-        int erase(const judy::word_t index) {
-            return judy::judy_erase<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+        int erase(const word_t index) {
+            CoreResult result = judy_erase_core<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);           
+            if(result.status == OpStatus::error) {
+                return -1;
+            }
+            return (result.status == OpStatus::erased ? 1 : 0);
         }
 
-        judy::word_t count(const judy::word_t left, const judy::word_t right) const {
-            return judy::judy_count(jpm_, left, right);
+        std::optional<word_t> lower_bound(const word_t index) {
+            BoundCoreResult result = first_ge_in_jp<JudyPolicy, CapacityPolicy>(jpm_, &jpm_->top_jp, index, 0);
+            if(result.status == OpStatus::error) {
+                // for now, with no iterators
+                return std::optional<word_t>(static_cast<word_t>(-123456));
+            }
+
+            return (result.status == OpStatus::not_found ? std::nullopt : std::optional<word_t>(result.index));
         }
 
-        judy::word_t next(const judy::word_t index) const {
-            return judy::judy_next(jpm_, index);
+        std::optional<word_t> upper_bound(const word_t index) {
+            if(!jpm_ || index == detail::all_ones_mask) {
+                return std::nullopt;
+            }
+            return lower_bound(index + 1);
         }
 
-        judy::word_t prev(const judy::word_t index) const {
-            return judy::judy_prev(jpm_, index);
+        // <= x
+        std::optional<word_t> floor_bound(const word_t index) {
+            BoundCoreResult result = first_le_in_jp<JudyPolicy, CapacityPolicy>(jpm_, &jpm_->top_jp, index, 0);
+            if(result.status == OpStatus::error) {
+                return std::optional<word_t>(static_cast<word_t>(-123456));
+            }
+
+            return (result.status == OpStatus::not_found ? std::nullopt : std::optional<word_t>(result.index));
+        }
+        
+        // < x
+        std::optional<word_t> prev_bound(const word_t index) {
+            if(!jpm_ || index == 0) {
+                return std::nullopt;
+            }
+            return floor_bound(index - 1);
         }
 
-        judy::word_t first(const judy::word_t index) const  {
-            return judy::judy_first(jpm_, index);
-        }
-
-        judy::word_t last(const judy::word_t index) const {
-            return judy::judy_last(jpm_, index);
-        }
-
-        judy::word_t next_empty(const judy::word_t index) const {
-            return judy::judy_next_empty(jpm_, index);
-        }
-
-        judy::word_t prev_empty(const judy::word_t index) const {
-            return judy::judy_prev_empty(jpm_, index);
-        }
-
-        judy::word_t first_empty(const judy::word_t index) const {
-            return judy::judy_first_empty(jpm_, index);
-        }
-
-        judy::word_t last_empty(const judy::word_t index) const {
-            return judy::judy_last_empty(jpm_, index);
-        }
-
-        judy::word_t by_count(std::size_t pos) const {
-            return judy::by_count(jpm_, pos);
+        std::size_t memory()    const {
+            return jpm_->total_memory;
         }
 
         void clear() {
-            judy::judy_clear_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
+            judy_clear_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
         }
 
         ~Judy1() {
             if(jpm_) {
-                judy::judy_free_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
+                judy_free_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
             }
         }
 
@@ -3859,39 +4660,84 @@ namespace judy {
     requires JudyCapacityPolicy<CapacityPolicy>
     class JudyL {
     public:
-
-        using get_type = word_t*;
-        using insert_type = word_t*;
-        using erase_type = int;     
-
         using JudyPolicy = policy::JudyLPolicy;
 
         JudyL()  {
-            jpm_ = judy::judy_create(alloc_);
+            jpm_ = judy_create(alloc_);
             if(!jpm_) {
                 ;// throw? or outside should check
             }
         }
 
-        get_type get(const judy::word_t index) const {
-            return judy::judy_get<JudyPolicy, CapacityPolicy>(jpm_, index);
+        word_t* get(const word_t index) const {    
+            CoreResult result = judy_get_core<JudyPolicy, CapacityPolicy>(jpm_, index);
+            if(result.status == OpStatus::error) {
+                return error_value();
+            }
+            return (result.status == OpStatus::found ? result.value : nullptr);
         }
 
-        insert_type insert(const judy::word_t index) {
-            return judy::judy_insert<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+        word_t* insert(const word_t index) {
+            CoreResult result = judy_insert_core<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+            if(result.status == OpStatus::error) {
+                return error_value();
+            }
+            return result.value;
         }
 
-        erase_type erase(const judy::word_t index) {
-            return judy::judy_erase<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+        int erase(const word_t index) {
+            CoreResult result = judy_erase_core<JudyPolicy, CapacityPolicy>(jpm_, alloc_, index);
+            if(result.status == OpStatus::error) {
+                return -1;
+            }
+            return (result.status == OpStatus::erased ? 1 : 0);
+        }
+
+        std::pair<word_t, word_t*> lower_bound(const word_t index) {
+            BoundCoreResult result = first_ge_in_jp<JudyPolicy, CapacityPolicy>(jpm_, &jpm_->top_jp, index, 0);
+            if(result.status == OpStatus::error) {
+                return std::make_pair(0, nullptr);
+            }
+
+            return (result.status == OpStatus::not_found ? std::make_pair(0, nullptr) : std::make_pair(result.index, result.value));
+        }
+
+        std::pair<word_t, word_t*> upper_bound(const word_t index) {
+            if(!jpm_ || index == detail::all_ones_mask) {
+                return std::make_pair(0, nullptr);
+            }
+            return lower_bound(index + 1);
+        }
+
+        // <= x
+        std::pair<word_t, word_t*> floor_bound(const word_t index) {
+            BoundCoreResult result = first_le_in_jp<JudyPolicy, CapacityPolicy>(jpm_, &jpm_->top_jp, index, 0);
+            if(result.status == OpStatus::error) {
+                return std::make_pair(0, nullptr);
+            }
+
+            return (result.status == OpStatus::not_found ? std::make_pair(0, nullptr) : std::make_pair(result.index, result.value));
+        }
+        
+        // < x
+        std::pair<word_t, word_t*> prev_bound(const word_t index) {
+            if(!jpm_ || index == 0) {
+                return std::make_pair(0, nullptr);
+            }
+            return floor_bound(index - 1);
+        }
+
+        std::size_t memory()    const {
+            return jpm_->total_memory;
         }
 
         void clear() {
-            judy::judy_clear_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
+            judy_clear_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
         }
 
         ~JudyL() {
             if(jpm_) {
-                judy::judy_free_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
+                judy_free_array<JudyPolicy, CapacityPolicy>(jpm_, alloc_);
             }
         }
 
@@ -3905,6 +4751,5 @@ namespace judy {
         JPM* jpm_;
 
     };
-
 
 };
