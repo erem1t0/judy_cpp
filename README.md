@@ -24,6 +24,9 @@ Already done:
 - Template Allocators
 
 Upcoming:
+- Judy1/l:
+    - count
+    - by_count
  
 - JudySL
 - JudyHS
