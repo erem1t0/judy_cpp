@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.6.0
+
+## Changes
+- Added navigation core functions (first greater(less)_or_equal in JP)
+- Added empty indexes search functions (first empty greater(less)_or_equal in array)
+- change JudyReturn to CoreResult structures
+
+### Notes 
+- API may change in future versions
+
 ## 0.5.0
 
 ### Changes
