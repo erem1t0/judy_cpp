@@ -1,6 +1,6 @@
 # judy_cpp
 
-Current Version `v0.5.3`
+Current Version `v0.6.0`
 
 This is a modern header-only Judy Array C++ 20 library with parameter settings and templates.
 
@@ -17,18 +17,17 @@ Already done:
     - next (upper_bound)
     - prev (prev_bound)
     - last (floor_bound)
+    - first_empty (lower_bound_empty)
+    - next_empty (upper_bound_empty)
+    - prev_empty (prev_bound_empty)
+    - last_empty (floor_bound_empty)
 - Template Allocators
 
 Upcoming:
-
-- Judy1/L:
-    - first_empty
-    - next_empty
-    - prev_empty
-    - last_empty
  
 - JudySL
 - JudyHS
+
+- Normal API
  
 - documentation
-
